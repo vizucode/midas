@@ -38,6 +38,96 @@ function shouldUseMcp(prompt: string): boolean {
   return MCP_INTENT_PATTERN.test(prompt);
 }
 
+function hasPeriodQuery(prompt: string): boolean {
+  return /\b\d+\s+(hari|minggu|bulan|tahun)\s+terakhir\b|\b(hari|minggu|bulan|tahun)\s+ini\b|\b(last|past)\s+\d+\s+(days|weeks|months|years)\b/i.test(prompt);
+}
+
+function isRecentTransactionQuery(prompt: string): boolean {
+  return !hasPeriodQuery(prompt) && /\b(transaksi|transaction|mutasi|record)\b.*\b(terakhir|terbaru|latest|recent)\b|\b(terakhir|terbaru|latest|recent)\b.*\b(transaksi|transaction|mutasi|record)\b|\b(transaksi|transaction|mutasi|record)\b.*\b(hari ini|today)\b/i.test(prompt);
+}
+
+function isThreeMonthSummaryQuery(prompt: string): boolean {
+  return /\b(3|tiga)\s+bulan\s+terakhir\b|\blast\s+3\s+months\b|\bbulan\s+terakhir\b/i.test(prompt);
+}
+
+function startOfMonth(date: Date): string {
+  const value = new Date(date);
+  value.setUTCDate(1);
+  value.setUTCHours(0, 0, 0, 0);
+  return value.toISOString().slice(0, 10);
+}
+
+function monthsAgoRange(months: number): [string, string] {
+  const end = new Date();
+  const start = new Date();
+  start.setUTCMonth(start.getUTCMonth() - months);
+  return [`gte.${startOfMonth(start)}`, `lt.${end.toISOString().slice(0, 10)}`];
+}
+
+function currentMonthRange(): [string, string] {
+  const start = new Date();
+  start.setUTCDate(1);
+  start.setUTCHours(0, 0, 0, 0);
+  return [`gte.${start.toISOString().slice(0, 10)}`, `lt.${new Date().toISOString().slice(0, 10)}`];
+}
+
+function transactionQueryRange(prompt: string): [string, string] {
+  if (/\bhari ini\b|\btoday\b/i.test(prompt)) {
+    return todayRange();
+  }
+
+  if (isThreeMonthSummaryQuery(prompt)) {
+    return monthsAgoRange(3);
+  }
+
+  return currentMonthRange();
+}
+
+function todayRange(): [string, string] {
+  const today = new Date().toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  return [`gte.${today}`, `lt.${tomorrow}`];
+}
+
+type RecordResult = {
+  records?: Array<{
+    amount?: { currencyCode?: string; value?: number };
+    accountName?: string;
+    category?: { name?: string };
+    note?: string;
+    counterParty?: string;
+    recordDate?: string;
+    recordType?: string;
+  }>;
+};
+
+function formatLatestTransaction(result: string): string {
+  const data = JSON.parse(result) as RecordResult;
+  const record = data.records?.[0];
+
+  if (!record) {
+    return "📭 *Belum ada transaksi hari ini.*";
+  }
+
+  const amount = record.amount?.value ?? 0;
+  const currency = record.amount?.currencyCode || "IDR";
+  const formattedAmount = new Intl.NumberFormat("id-ID").format(Math.abs(amount));
+  const type = amount < 0 || record.recordType === "expense" ? "Pengeluaran" : "Pemasukan";
+  const icon = type === "Pengeluaran" ? "💸" : "💰";
+  const description = record.note || record.counterParty || "Tanpa keterangan";
+  const date = record.recordDate ? new Date(record.recordDate).toLocaleString("id-ID") : "-";
+
+  return [
+    "📌 *TRANSAKSI TERAKHIR HARI INI*",
+    "",
+    `${icon} *${type}:* ${currency} ${formattedAmount}`,
+    `📝 *Keterangan:* ${description}`,
+    `🏷️ *Kategori:* ${record.category?.name || "Tanpa kategori"}`,
+    `🏦 *Akun:* ${record.accountName || "-"}`,
+    `🕒 *Waktu:* ${date}`,
+  ].join("\n");
+}
+
 async function requestNineRouter(
   messages: ChatMessage[],
   tools?: ReturnType<typeof getOpenAiTools>,
@@ -84,42 +174,63 @@ async function askNineRouter(prompt: string): Promise<string> {
   }
 
   const mcpTools = await listMcpTools();
-  const tool =
-    mcpTools.find((item) => item.name === "get_records_aggregation") ||
-    mcpTools.find((item) => item.name === "get_records") ||
-    mcpTools[0];
+  const tool = isRecentTransactionQuery(prompt)
+    ? mcpTools.find((item) => item.name === "get_records")
+    : mcpTools.find((item) => item.name === "get_records_aggregation") ||
+      mcpTools.find((item) => item.name === "get_records") ||
+      mcpTools[0];
 
   if (!tool) {
     const data = await requestNineRouter(messages);
     return data.choices?.[0]?.message?.content?.trim() || "";
   }
 
-  const args =
-    tool.name === "get_records_aggregation"
+  const args = isRecentTransactionQuery(prompt)
+    ? {
+        recordDate: transactionQueryRange(prompt),
+        sortBy: ["-recordDate"],
+        limit: 1,
+      }
+    : isThreeMonthSummaryQuery(prompt)
       ? {
           groupBy: ["month", "category:name"],
           compute: ["baseAmount:absSum"],
           recordType: "expense",
-          recordDate: ["gte.2026-05-31", "lt.2026-08-31"],
+          recordDate: monthsAgoRange(3),
           limit: 1000,
         }
-      : tool.name === "get_records"
+      : tool.name === "get_records_aggregation"
         ? {
+            groupBy: ["month", "category:name"],
+            compute: ["baseAmount:absSum"],
             recordType: "expense",
-            recordDate: ["gte.2026-05-31", "lt.2026-08-31"],
+            recordDate: monthsAgoRange(3),
             limit: 1000,
           }
-        : {};
+        : tool.name === "get_records"
+          ? {
+              recordType: "expense",
+              recordDate: monthsAgoRange(3),
+              limit: 1000,
+            }
+          : {};
 
   const result = await callMcpTool(tool.name, args);
+
+  if (isRecentTransactionQuery(prompt)) {
+    return formatLatestTransaction(result);
+  }
+
   const analysisMessages: ChatMessage[] = [
     {
       role: "user",
       content:
         `Analisa kondisi keuangan dari data MCP berikut untuk pertanyaan: ${prompt}\n\n` +
         `Format wajib cocok untuk Telegram: judul tebal, emoji relevan, bullet ringkas, angka penting ditebalkan, mudah dibaca di chat.\n` +
-        `Fokus pada pengeluaran per kategori 3 bulan terakhir, breakdown bulanan, kategori terbesar, dan insight singkat.\n\n` +
-        result,
+        (isRecentTransactionQuery(prompt)
+          ? "Fokus pada transaksi terbaru saja. Jika kosong, jawab belum ada transaksi hari ini.\n"
+          : "Fokus pada pengeluaran per kategori 3 bulan terakhir, breakdown bulanan, kategori terbesar, dan insight singkat.\n") +
+        `\n${result}`,
     },
   ];
 
