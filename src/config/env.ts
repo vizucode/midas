@@ -5,6 +5,8 @@ const NINE_ROUTER_MODEL = Bun.env.NINE_ROUTER_MODEL?.trim();
 const MCP_SERVER_URL = Bun.env.MCP_SERVER_URL?.trim();
 const MCP_SERVER_AUTH_TOKEN = Bun.env.MCP_SERVER_AUTH_TOKEN?.trim();
 const MCP_SERVER_AUTH_HEADER = Bun.env.MCP_SERVER_AUTH_HEADER?.trim() || "Bearer";
+const TURSO_HOST = Bun.env.TURSO_HOST?.trim();
+const TURSO_TOKEN = Bun.env.TURSO_TOKEN?.trim();
 
 if (!BOT_TOKEN) {
   throw new Error("BOT_TOKEN wajib diisi di file .env");
@@ -30,6 +32,14 @@ if (!MCP_SERVER_AUTH_TOKEN) {
   throw new Error("MCP_SERVER_AUTH_TOKEN wajib diisi di file .env");
 }
 
+if (!TURSO_HOST) {
+  throw new Error("TURSO_HOST wajib diisi di file .env");
+}
+
+if (!TURSO_TOKEN) {
+  throw new Error("TURSO_TOKEN wajib diisi di file .env");
+}
+
 export const env = {
   BOT_TOKEN,
   NINE_ROUTER_BASE_URL,
@@ -38,4 +48,6 @@ export const env = {
   MCP_SERVER_URL,
   MCP_SERVER_AUTH_TOKEN,
   MCP_SERVER_AUTH_HEADER,
+  TURSO_HOST,
+  TURSO_TOKEN,
 } as const;

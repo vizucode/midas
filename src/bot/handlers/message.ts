@@ -1,5 +1,6 @@
 import type { Bot } from "grammy";
 import { env } from "../../config/env";
+import { getConversationState, saveConversationState, saveIntent } from "../../lib/db";
 import { callMcpTool, getOpenAiTools, listMcpTools } from "../../lib/mcp";
 
 type ChatMessage = {
@@ -14,6 +15,12 @@ type ChatMessage = {
       arguments: string;
     };
   }>;
+};
+
+type Intent = {
+  intent: "daily_transaction_summary" | "spending_summary" | "income_summary" | "balance_check" | "budget_check" | "create_transaction" | "general" | "unknown";
+  params: Record<string, unknown>;
+  clarification?: string;
 };
 
 type ChatResponse = {
@@ -32,7 +39,7 @@ type ChatResponse = {
   }>;
 };
 
-const MCP_INTENT_PATTERN = /\b(wallet|rekening|account|balance|saldo|budget|cash|tabungan|expense|expenses|income|transaction|transactions|mutasi|bank|kartu|card|dompet|finance|finansial|keuangan)\b/i;
+const MCP_INTENT_PATTERN = /\b(wallet|rekening|account|balance|saldo|budget|cash|tabungan|expense|expenses|income|transaction|transactions|mutasi|bank|kartu|card|dompet|finance|finansial|keuangan|pengeluaran|pemasukan|utang|piutang|kategori|belanja|bayar|dibayar|habis|uang)\b/i;
 
 function shouldUseMcp(prompt: string): boolean {
   return MCP_INTENT_PATTERN.test(prompt);
@@ -101,6 +108,22 @@ type RecordResult = {
   }>;
 };
 
+function formatDailyTransactions(result: string): string {
+  const data = JSON.parse(result) as RecordResult;
+  const records = data.records || [];
+  if (!records.length) return "📭 *Belum ada pengeluaran hari ini di Wallet.*";
+  let total = 0;
+  const lines = records.map((record, index) => {
+    const amount = Math.abs(record.amount?.value || 0);
+    total += amount;
+    const currency = record.amount?.currencyCode || "IDR";
+    const description = record.note || record.counterParty || "Tanpa keterangan";
+    const category = record.category?.name || "Tanpa kategori";
+    return `${index + 1}. ${description} — ${currency} ${new Intl.NumberFormat("id-ID").format(amount)} (${category})`;
+  });
+  return `📊 *Pengeluaran hari ini (WIB)*\n\n${lines.join("\n")}\n\n💸 *Total: IDR ${new Intl.NumberFormat("id-ID").format(total)}*`;
+}
+
 function formatLatestTransaction(result: string): string {
   const data = JSON.parse(result) as RecordResult;
   const record = data.records?.[0];
@@ -158,84 +181,123 @@ async function requestNineRouter(
   return (await response.json()) as ChatResponse;
 }
 
-async function askNineRouter(prompt: string): Promise<string> {
+async function classifyIntent(prompt: string, previousIntent?: string | null, previousParams?: string | null): Promise<Intent> {
+  const todayWib = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const response = await requestNineRouter([{
+    role: "system",
+    content: `Klasifikasikan pesan menjadi satu intent: daily_transaction_summary, spending_summary, income_summary, balance_check, budget_check, create_transaction, general, unknown. Balas JSON valid saja dengan bentuk {"intent":"...","params":{},"clarification":"..."}. Isi params dari pesan: date, dateRange, recordType, category, account, amount, description, timezone. Hari ini dalam WIB adalah ${todayWib}; frasa "hari ini" tidak ambigu dan harus memakai tanggal tersebut tanpa bertanya timezone. Pesan berupa zona waktu seperti WIB/WITA/WIT/UTC adalah follow-up terhadap intent sebelumnya. Gunakan konteks intent sebelumnya dan gabungkan params sebelumnya untuk follow-up. Jika permintaan ambigu dan konteks tidak cukup, pilih unknown dan isi clarification. Intent sebelumnya: ${previousIntent || "-"}. Params sebelumnya: ${previousParams || "-"}.`,
+  }, { role: "user", content: prompt }]);
+  const content = response.choices?.[0]?.message?.content?.trim() || "";
+  try {
+    return JSON.parse(content.replace(/^```json\s*|\s*```$/g, "")) as Intent;
+  } catch {
+    return { intent: "unknown", params: {}, clarification: "Maksud permintaan Anda belum dapat dipahami. Bisa dijelaskan lebih spesifik?" };
+  }
+}
+
+function nextDate(date: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) throw new Error(`Invalid date: ${date}`);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+}
+
+function todayWibRange(): [string, string] {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const value = (type: string) => parts.find((part) => part.type === type)?.value;
+  const today = `${value("year")}-${value("month")}-${value("day")}`;
+  return [`gte.${today}`, `lt.${nextDate(today)}`];
+}
+
+function readToolForIntent(intent: Intent): { name: string; args: Record<string, unknown> } | null {
+  const date = typeof intent.params.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(intent.params.date)
+    ? intent.params.date
+    : undefined;
+  const recordDate = date ? [`gte.${date}`, `lt.${nextDate(date)}`] : todayWibRange();
+
+  if (intent.intent === "daily_transaction_summary" || intent.intent === "spending_summary" || intent.intent === "income_summary") {
+    return { name: "get_records", args: { recordType: intent.intent === "income_summary" ? "income" : "expense", recordDate, sortBy: ["-recordDate"], limit: 100 } };
+  }
+  if (intent.intent === "balance_check") return { name: "get_accounts", args: {} };
+  if (intent.intent === "budget_check") return { name: "get_budgets", args: {} };
+  return null;
+}
+
+async function askNineRouter(prompt: string, chatId: string): Promise<string> {
+  const state = await getConversationState(chatId);
+  const classifiedIntent = await classifyIntent(prompt, state?.lastIntent, state?.lastParams);
+  const intent = /\b(pengeluaran|transaksi|belanja)\b.*\b(hari ini|today)\b/i.test(prompt)
+    ? { ...classifiedIntent, intent: "daily_transaction_summary" as const }
+    : classifiedIntent;
+  const params = JSON.stringify(intent.params);
+  await saveIntent({ chatId, intent: intent.intent, params, prompt });
+
+  if (intent.intent === "unknown") {
+    return intent.clarification || "Maksud permintaan Anda belum jelas. Bisa dijelaskan lebih spesifik?";
+  }
+
+  if (intent.intent === "create_transaction" && !/\b(konfirmasi|ya,?\s*(catat|simpan)|lanjutkan)\b/i.test(prompt)) {
+    await saveConversationState({ chatId, lastIntent: intent.intent, lastParams: params });
+    return `Konfirmasi pencatatan transaksi berikut: ${params}\n\nBalas *konfirmasi* untuk menyimpan.`;
+  }
   const messages: ChatMessage[] = [
     {
       role: "system",
       content:
-        "Jawab dalam format Telegram yang rapi dan eye-catching. Pakai emoji seperlunya, bullet singkat, bold untuk judul/angka penting, dan hindari penjelasan panjang.",
+        `Jawab dalam Bahasa Indonesia dengan format Telegram yang rapi. Intent terklasifikasi: ${intent.intent}. Params: ${params}. Untuk data keuangan Wallet, wajib gunakan MCP tools dan jangan mengarang atau memakai riwayat chat sebagai sumber data. Untuk create_transaction, hanya panggil create_records bila user sudah mengonfirmasi. Pakai emoji seperlunya, bullet singkat, bold untuk judul/angka penting.`,
     },
+    ...(state
+      ? [{
+          role: "system" as const,
+          content: `Konteks percakapan terakhir: intent=${state.lastIntent || "-"}, params=${state.lastParams || "-"}, tool=${state.lastTool || "-"}. Gunakan hanya sebagai konteks follow-up, bukan sumber data keuangan.`,
+        }]
+      : []),
     { role: "user", content: prompt },
   ];
 
-  if (!shouldUseMcp(prompt)) {
-    const data = await requestNineRouter(messages);
-    return data.choices?.[0]?.message?.content?.trim() || "";
+  const routedTool = readToolForIntent(intent);
+  if (routedTool) {
+    let result: string;
+    try {
+      result = await callMcpTool(routedTool.name, routedTool.args);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "MCP tool failed";
+      await saveConversationState({
+        chatId,
+        lastIntent: intent.intent,
+        lastParams: params,
+        lastTool: routedTool.name,
+        lastToolResult: JSON.stringify({ error: message }),
+      });
+      return `MCP gagal membaca data: ${message}`;
+    }
+    await saveConversationState({
+      chatId,
+      lastIntent: intent.intent,
+      lastParams: params,
+      lastTool: routedTool.name,
+      lastToolResult: result,
+    });
+    if (intent.intent === "daily_transaction_summary") {
+      return formatDailyTransactions(result);
+    }
+    messages.push({
+      role: "system",
+      content: `Hasil MCP dari ${routedTool.name}:\n${result}\n\nJawab pertanyaan user dari hasil ini. Jangan mengarang atau meminta data yang sudah tersedia.`,
+    });
+    const final = await requestNineRouter(messages);
+    return final.choices?.[0]?.message?.content?.trim() || "MCP tidak mengembalikan jawaban.";
   }
 
-  const mcpTools = await listMcpTools();
-  const tool = isRecentTransactionQuery(prompt)
-    ? mcpTools.find((item) => item.name === "get_records")
-    : mcpTools.find((item) => item.name === "get_records_aggregation") ||
-      mcpTools.find((item) => item.name === "get_records") ||
-      mcpTools[0];
-
-  if (!tool) {
-    const data = await requestNineRouter(messages);
-    return data.choices?.[0]?.message?.content?.trim() || "";
-  }
-
-  const args = isRecentTransactionQuery(prompt)
-    ? {
-        recordDate: transactionQueryRange(prompt),
-        sortBy: ["-recordDate"],
-        limit: 1,
-      }
-    : isThreeMonthSummaryQuery(prompt)
-      ? {
-          groupBy: ["month", "category:name"],
-          compute: ["baseAmount:absSum"],
-          recordType: "expense",
-          recordDate: monthsAgoRange(3),
-          limit: 1000,
-        }
-      : tool.name === "get_records_aggregation"
-        ? {
-            groupBy: ["month", "category:name"],
-            compute: ["baseAmount:absSum"],
-            recordType: "expense",
-            recordDate: monthsAgoRange(3),
-            limit: 1000,
-          }
-        : tool.name === "get_records"
-          ? {
-              recordType: "expense",
-              recordDate: monthsAgoRange(3),
-              limit: 1000,
-            }
-          : {};
-
-  const result = await callMcpTool(tool.name, args);
-
-  if (isRecentTransactionQuery(prompt)) {
-    return formatLatestTransaction(result);
-  }
-
-  const analysisMessages: ChatMessage[] = [
-    {
-      role: "user",
-      content:
-        `Analisa kondisi keuangan dari data MCP berikut untuk pertanyaan: ${prompt}\n\n` +
-        `Format wajib cocok untuk Telegram: judul tebal, emoji relevan, bullet ringkas, angka penting ditebalkan, mudah dibaca di chat.\n` +
-        (isRecentTransactionQuery(prompt)
-          ? "Fokus pada transaksi terbaru saja. Jika kosong, jawab belum ada transaksi hari ini.\n"
-          : "Fokus pada pengeluaran per kategori 3 bulan terakhir, breakdown bulanan, kategori terbesar, dan insight singkat.\n") +
-        `\n${result}`,
-    },
-  ];
-
-  const final = await requestNineRouter(analysisMessages);
-  return final.choices?.[0]?.message?.content?.trim() || result || "";
+  const response = await requestNineRouter(messages);
+  return response.choices?.[0]?.message?.content?.trim() || "Data MCP tidak tersedia.";
 }
 
 export function registerMessageHandler(bot: Bot): void {
@@ -251,8 +313,12 @@ export function registerMessageHandler(bot: Bot): void {
 
   bot.on("message:text", async (ctx) => {
     const name = ctx.from.first_name || ctx.from.username || "teman";
-    const answer = await askNineRouter(ctx.message.text);
+    const answer = await askNineRouter(ctx.message.text, String(ctx.chat.id));
 
-    await ctx.reply(answer || `hello ${name}`, { parse_mode: "Markdown" });
+    try {
+      await ctx.reply(answer || `hello ${name}`, { parse_mode: "Markdown" });
+    } catch {
+      await ctx.reply(answer || `hello ${name}`);
+    }
   });
 }

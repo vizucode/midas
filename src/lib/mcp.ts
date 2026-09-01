@@ -150,6 +150,10 @@ export async function callMcpTool(name: string, args: unknown): Promise<string> 
     .join("\n")
     .trim();
 
+  if (result.isError) {
+    throw new Error(text || "MCP tool returned an error");
+  }
+
   if (text) {
     return text;
   }

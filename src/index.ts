@@ -1,9 +1,12 @@
 import { bot } from "./bot/client";
+import { initDb } from "./lib/db";
 import { listMcpTools } from "./lib/mcp";
 
 bot.catch(({ error }) => {
   console.error("Telegram bot error:", error);
 });
+
+await initDb();
 
 try {
   const tools = await listMcpTools(true);
