@@ -1,0 +1,16 @@
+name = "tele-finance-asisstant"
+main = "src/index.ts"
+compatibility_date = "2026-09-16"
+
+[vars]
+NINE_ROUTER_BASE_URL = "https://xclaw-ai.confnameserver.xyz/v1"
+NINE_ROUTER_MODEL = "my-combo-1"
+MCP_SERVER_URL = "https://mcp.wallet.budgetbakers.com"
+MCP_SERVER_AUTH_HEADER = "Bearer"
+
+# Secrets — set via CLI, JANGAN taruh di file ini:
+#   npx wrangler secret put BOT_TOKEN
+#   npx wrangler secret put NINE_ROUTER_API_KEY
+#   npx wrangler secret put MCP_SERVER_AUTH_TOKEN
+#   npx wrangler secret put TURSO_HOST
+#   npx wrangler secret put TURSO_TOKEN
