@@ -124,6 +124,8 @@ export async function listMcpTools(refresh = false): Promise<McpTool[]> {
 export async function callMcpTool(name: string, args: unknown): Promise<string> {
   await initialize();
 
+  console.log(`[MCP] Call ${name}:`, JSON.stringify(args));
+
   const response = await post<McpToolCallResult>({
     jsonrpc: "2.0",
     id: requestId++,
@@ -133,6 +135,8 @@ export async function callMcpTool(name: string, args: unknown): Promise<string> 
       arguments: args,
     },
   });
+
+  console.log(`[MCP] Result ${name}:`, JSON.stringify(response));
 
   if (response.error) {
     throw new Error(`MCP tools/call failed: ${response.error.message}`);
