@@ -1,5 +1,5 @@
 import type { Bot } from "grammy";
-import { env } from "../../config/env";
+import type { Env } from "../../config/env";
 import { getConversationState, saveConversationState, saveIntent } from "../../lib/db";
 import { callMcpTool, getOpenAiTools, listMcpTools } from "../../lib/mcp";
 
@@ -34,6 +34,7 @@ const WRITE_TOOL_PATTERN = /^(create|update|delete|remove|edit|set|add)_/i;
 const CONFIRM_PATTERN = /\b(konfirmasi|ya,?\s*(catat|simpan)|lanjutkan|setuju)\b/i;
 
 async function requestNineRouter(
+  env: Env,
   messages: ChatMessage[],
   tools?: ReturnType<typeof getOpenAiTools>,
 ): Promise<ChatResponse> {
@@ -79,9 +80,9 @@ function todayWib(): string {
   }).format(new Date());
 }
 
-async function askNineRouter(prompt: string, chatId: string): Promise<string> {
-  const state = await getConversationState(chatId);
-  const tools = await listMcpTools();
+async function askNineRouter(env: Env, prompt: string, chatId: string): Promise<string> {
+  const state = await getConversationState(env, chatId);
+  const tools = await listMcpTools(env);
   const confirmed = CONFIRM_PATTERN.test(prompt);
 
   const messages: ChatMessage[] = [
@@ -102,13 +103,13 @@ async function askNineRouter(prompt: string, chatId: string): Promise<string> {
   let lastResult: string | null = null;
 
   for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-    const response = await requestNineRouter(messages, getOpenAiTools(tools));
+    const response = await requestNineRouter(env, messages, getOpenAiTools(tools));
     const message = response.choices?.[0]?.message;
     const calls = message?.tool_calls ?? [];
 
     if (!message || calls.length === 0) {
       const answer = message?.content?.trim() || "Maaf, jawaban belum tersedia. Coba jelaskan lebih spesifik.";
-      await saveConversationState({
+      await saveConversationState(env, {
         chatId,
         lastIntent: lastTool ? "tool_call" : "chat",
         lastParams: null,
@@ -134,7 +135,7 @@ async function askNineRouter(prompt: string, chatId: string): Promise<string> {
       }
 
       if (WRITE_TOOL_PATTERN.test(name) && !confirmed) {
-        await saveConversationState({
+        await saveConversationState(env, {
           chatId,
           lastIntent: "await_confirmation",
           lastParams: call.function?.arguments || null,
@@ -153,10 +154,10 @@ async function askNineRouter(prompt: string, chatId: string): Promise<string> {
       }
 
       try {
-        const result = await callMcpTool(name, args);
+        const result = await callMcpTool(env, name, args);
         lastTool = name;
         lastResult = result;
-        await saveIntent({ chatId, intent: name, params: JSON.stringify(args), prompt });
+        await saveIntent(env, { chatId, intent: name, params: JSON.stringify(args), prompt });
         messages.push({ role: "tool", tool_call_id: call.id, content: result || "(kosong)" });
       } catch (error) {
         const detail = error instanceof Error ? error.message : "MCP tool gagal";
@@ -168,10 +169,10 @@ async function askNineRouter(prompt: string, chatId: string): Promise<string> {
   return "Permintaan terlalu kompleks (batas langkah tool tercapai). Coba persempit pertanyaannya.";
 }
 
-export function registerMessageHandler(bot: Bot): void {
+export function registerMessageHandler(bot: Bot, env: Env): void {
   bot.command("status", async (ctx) => {
     try {
-      const tools = await listMcpTools(true);
+      const tools = await listMcpTools(env, true);
       await ctx.reply(`BudgetBakers MCP connected (${tools.length} tools)`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -183,7 +184,7 @@ export function registerMessageHandler(bot: Bot): void {
     await ctx.replyWithChatAction("typing");
     let answer: string;
     try {
-      answer = await askNineRouter(ctx.message.text, String(ctx.chat.id));
+      answer = await askNineRouter(env, ctx.message.text, String(ctx.chat.id));
     } catch (error) {
       answer = `Gagal memproses: ${error instanceof Error ? error.message : "error tidak dikenal"}`;
     }

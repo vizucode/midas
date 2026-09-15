@@ -1,53 +1,42 @@
-const BOT_TOKEN = Bun.env.BOT_TOKEN?.trim();
-const NINE_ROUTER_BASE_URL = Bun.env.NINE_ROUTER_BASE_URL?.trim();
-const NINE_ROUTER_API_KEY = Bun.env.NINE_ROUTER_API_KEY?.trim();
-const NINE_ROUTER_MODEL = Bun.env.NINE_ROUTER_MODEL?.trim();
-const MCP_SERVER_URL = Bun.env.MCP_SERVER_URL?.trim();
-const MCP_SERVER_AUTH_TOKEN = Bun.env.MCP_SERVER_AUTH_TOKEN?.trim();
-const MCP_SERVER_AUTH_HEADER = Bun.env.MCP_SERVER_AUTH_HEADER?.trim() || "Bearer";
-const TURSO_HOST = Bun.env.TURSO_HOST?.trim();
-const TURSO_TOKEN = Bun.env.TURSO_TOKEN?.trim();
+export type Env = {
+  BOT_TOKEN: string;
+  NINE_ROUTER_BASE_URL: string;
+  NINE_ROUTER_API_KEY: string;
+  NINE_ROUTER_MODEL: string;
+  MCP_SERVER_URL: string;
+  MCP_SERVER_AUTH_TOKEN: string;
+  MCP_SERVER_AUTH_HEADER: string;
+  TURSO_HOST: string;
+  TURSO_TOKEN: string;
+};
 
-if (!BOT_TOKEN) {
-  throw new Error("BOT_TOKEN wajib diisi di file .env");
+const REQUIRED_KEYS = [
+  "BOT_TOKEN",
+  "NINE_ROUTER_BASE_URL",
+  "NINE_ROUTER_API_KEY",
+  "NINE_ROUTER_MODEL",
+  "MCP_SERVER_URL",
+  "MCP_SERVER_AUTH_TOKEN",
+  "TURSO_HOST",
+  "TURSO_TOKEN",
+] as const;
+
+export function parseEnv(source: Record<string, string | undefined>): Env {
+  const get = (key: string) => source[key]?.trim();
+
+  for (const key of REQUIRED_KEYS) {
+    if (!get(key)) throw new Error(`${key} wajib diisi (env var atau secret)`);
+  }
+
+  return {
+    BOT_TOKEN: get("BOT_TOKEN")!,
+    NINE_ROUTER_BASE_URL: get("NINE_ROUTER_BASE_URL")!,
+    NINE_ROUTER_API_KEY: get("NINE_ROUTER_API_KEY")!,
+    NINE_ROUTER_MODEL: get("NINE_ROUTER_MODEL")!,
+    MCP_SERVER_URL: get("MCP_SERVER_URL")!,
+    MCP_SERVER_AUTH_TOKEN: get("MCP_SERVER_AUTH_TOKEN")!,
+    MCP_SERVER_AUTH_HEADER: get("MCP_SERVER_AUTH_HEADER") || "Bearer",
+    TURSO_HOST: get("TURSO_HOST")!,
+    TURSO_TOKEN: get("TURSO_TOKEN")!,
+  };
 }
-
-if (!NINE_ROUTER_BASE_URL) {
-  throw new Error("NINE_ROUTER_BASE_URL wajib diisi di file .env");
-}
-
-if (!NINE_ROUTER_API_KEY) {
-  throw new Error("NINE_ROUTER_API_KEY wajib diisi di file .env");
-}
-
-if (!NINE_ROUTER_MODEL) {
-  throw new Error("NINE_ROUTER_MODEL wajib diisi di file .env");
-}
-
-if (!MCP_SERVER_URL) {
-  throw new Error("MCP_SERVER_URL wajib diisi di file .env");
-}
-
-if (!MCP_SERVER_AUTH_TOKEN) {
-  throw new Error("MCP_SERVER_AUTH_TOKEN wajib diisi di file .env");
-}
-
-if (!TURSO_HOST) {
-  throw new Error("TURSO_HOST wajib diisi di file .env");
-}
-
-if (!TURSO_TOKEN) {
-  throw new Error("TURSO_TOKEN wajib diisi di file .env");
-}
-
-export const env = {
-  BOT_TOKEN,
-  NINE_ROUTER_BASE_URL,
-  NINE_ROUTER_API_KEY,
-  NINE_ROUTER_MODEL,
-  MCP_SERVER_URL,
-  MCP_SERVER_AUTH_TOKEN,
-  MCP_SERVER_AUTH_HEADER,
-  TURSO_HOST,
-  TURSO_TOKEN,
-} as const;

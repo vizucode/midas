@@ -1,4 +1,4 @@
-name = "tele-finance-asisstant"
+name = "midas"
 main = "src/index.ts"
 compatibility_date = "2026-09-16"
 

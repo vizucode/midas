@@ -1,21 +1,15 @@
-import { bot } from "./bot/client";
+import { webhookCallback } from "grammy";
+import { createBot } from "./bot/client";
+import { parseEnv } from "./config/env";
 import { initDb } from "./lib/db";
-import { listMcpTools } from "./lib/mcp";
 
-bot.catch(({ error }) => {
-  console.error("Telegram bot error:", error);
-});
+export default {
+  async fetch(request: Request, rawEnv: Record<string, string | undefined>): Promise<Response> {
+    const env = parseEnv(rawEnv);
+    await initDb(env);
 
-await initDb();
-
-try {
-  const tools = await listMcpTools(true);
-  console.log(`BudgetBakers MCP connected (${tools.length} tools)`);
-} catch (error) {
-  const message = error instanceof Error ? error.message : "Unknown error";
-  console.error(`BudgetBakers MCP disconnected: ${message}`);
-}
-
-await bot.start({
-  onStart: ({ username }) => console.log(`Bot @${username} berjalan`),
-});
+    const bot = createBot(env);
+    bot.catch(({ error }) => console.error("Telegram bot error:", error));
+    return webhookCallback(bot, "cloudflare-mod")(request);
+  },
+};

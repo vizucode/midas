@@ -1,4 +1,4 @@
-import { env } from "../config/env";
+import type { Env } from "../config/env";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -34,7 +34,7 @@ let sessionId: string | null = null;
 let initialized = false;
 let cachedTools: McpTool[] | null = null;
 
-function getHeaders(extra?: Record<string, string>): Record<string, string> {
+function getHeaders(env: Env, extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
@@ -50,10 +50,10 @@ function getHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers;
 }
 
-async function post<T>(body: JsonRpcRequest): Promise<JsonRpcResponse<T>> {
+async function post<T>(env: Env, body: JsonRpcRequest): Promise<JsonRpcResponse<T>> {
   const response = await fetch(env.MCP_SERVER_URL, {
     method: "POST",
-    headers: getHeaders(),
+    headers: getHeaders(env),
     body: JSON.stringify(body),
   });
 
@@ -69,12 +69,12 @@ async function post<T>(body: JsonRpcRequest): Promise<JsonRpcResponse<T>> {
   return (await response.json()) as JsonRpcResponse<T>;
 }
 
-async function initialize(): Promise<void> {
+async function initialize(env: Env): Promise<void> {
   if (initialized) {
     return;
   }
 
-  const initResponse = await post<{ protocolVersion?: string }>({
+  const initResponse = await post<{ protocolVersion?: string }>(env, {
     jsonrpc: "2.0",
     id: requestId++,
     method: "initialize",
@@ -92,7 +92,7 @@ async function initialize(): Promise<void> {
     throw new Error(`MCP initialize failed: ${initResponse.error.message}`);
   }
 
-  await post<void>({
+  await post<void>(env, {
     jsonrpc: "2.0",
     method: "notifications/initialized",
   });
@@ -100,14 +100,14 @@ async function initialize(): Promise<void> {
   initialized = true;
 }
 
-export async function listMcpTools(refresh = false): Promise<McpTool[]> {
-  await initialize();
+export async function listMcpTools(env: Env, refresh = false): Promise<McpTool[]> {
+  await initialize(env);
 
   if (cachedTools && !refresh) {
     return cachedTools;
   }
 
-  const response = await post<{ tools?: McpTool[] }>({
+  const response = await post<{ tools?: McpTool[] }>(env, {
     jsonrpc: "2.0",
     id: requestId++,
     method: "tools/list",
@@ -121,12 +121,12 @@ export async function listMcpTools(refresh = false): Promise<McpTool[]> {
   return cachedTools;
 }
 
-export async function callMcpTool(name: string, args: unknown): Promise<string> {
-  await initialize();
+export async function callMcpTool(env: Env, name: string, args: unknown): Promise<string> {
+  await initialize(env);
 
   console.log(`[MCP] Call ${name}:`, JSON.stringify(args));
 
-  const response = await post<McpToolCallResult>({
+  const response = await post<McpToolCallResult>(env, {
     jsonrpc: "2.0",
     id: requestId++,
     method: "tools/call",
