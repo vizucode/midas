@@ -10,17 +10,20 @@ const BASE_PROMPT = `Kamu asisten keuangan pribadi di Telegram. Jawab dalam Baha
 
 ATURAN TOOL: Panggil tool hanya bila butuh data. Setelah data cukup, langsung beri jawaban final dan jangan panggil tool lagi. Jangan panggil tool yang sama lagi dengan parameter sama atau mirip setelah berhasil. Jika tool error, coba paling banyak sekali lagi dengan parameter berbeda; bila gagal lagi, jelaskan keterbatasannya kepada user. Maksimal empat putaran tool per percakapan.
 
+RESOLUSI DATA UNTUK TRANSAKSI: Jangan pernah memakai nama akun atau kategori dari user sebagai ID atau menyimpulkan bahwa data tidak tersedia tanpa memeriksa MCP. Bila user menyebut akun, panggil get_accounts dan cocokkan nama ke akun yang tersedia. Bila user menyebut kategori natural seperti barang, aktivitas, atau tujuan belanja, panggil get_categories lalu pilih kategori MCP yang paling sesuai berdasarkan nama dan grup kategorinya. Jangan hardcode pemetaan kategori. Sebelum create_records, wajib sudah memiliki accountId dan categoryId valid dari hasil MCP. Saat meminta konfirmasi, tampilkan akun dan kategori MCP yang dipilih. Hanya tanya user jika hasil MCP benar-benar tidak memberi satu pilihan yang masuk akal.
+
 **PENTING — Rekomendasi Keuangan:**
 Untuk setiap jawaban yang berkaitan dengan data keuangan (saldo, pengeluaran, pemasukan, kategori spending, budget, rata-rata harian, dll), WAJIB tambahkan 1 baris rekomendasi singkat yang relevan dengan angka/fakta yang baru saja ditampilkan. Contoh: jika pengeluaran kategori tertentu tinggi, sarankan evaluasi; jika saldo menipis mendekati akhir bulan, ingatkan persiapan; jika pola pengeluaran wajar, beri apresiasi singkat. Rekomendasi harus spesifik berdasarkan data yang ditunjukkan, BUKAN template generik. Tuliskan di baris baru dengan format: 💡 *Saran:* [isi rekomendasi]. Jangan tambahkan saran untuk jawaban non-finansial (sapaan umum, error, instruksi, permintaan konfirmasi).`;
 
-const READ_ONLY_SUFFIX = `\n\nTool untuk menulis/mengubah/menghapus data (catat transaksi, dsb) TIDAK tersedia buatmu sekarang. Jika user memintanya: jangan mencoba memanggil tool apapun untuk itu, cukup jelaskan singkat rencana aksinya (tool apa, data apa), lalu WAJIB akhiri pesanmu persis dengan baris baru berisi "[BUTUH_KONFIRMASI]" tanpa teks lain setelahnya.`;
+const READ_ONLY_SUFFIX = `\n\nTool untuk menulis/mengubah/menghapus data belum tersedia sampai user mengonfirmasi. Jika user meminta pencatatan transaksi: daftar lengkap akun, kategori, dan label sudah tersedia di blok "DATA REFERENSI MCP TERKINI" pada pesan user. Cocokkan nama akun, kategori, dan label secara case-insensitive dari daftar tersebut, lalu gunakan ID yang tercantum. Jangan panggil get_accounts, get_categories, atau get_labels lagi kecuali data yang dibutuhkan benar-benar tidak ada di daftar referensi. Setelah resolusi selesai, jelaskan rencana aksi beserta nama akun, kategori, dan label MCP yang dipilih. Jangan mengatakan tool penulisan tidak tersedia dan jangan bilang label/kategori tidak ada bila sudah tercantum di daftar referensi. Lalu WAJIB akhiri pesanmu persis dengan baris baru berisi "[BUTUH_KONFIRMASI]" tanpa teks lain setelahnya.`;
 
-const CONFIRMED_SUFFIX = `\n\nUser sudah mengonfirmasi aksi ini sebelumnya. Lanjutkan eksekusi tool yang relevan sekarang.`;
+const CONFIRMED_SUFFIX = `\n\nUser sudah mengonfirmasi aksi ini sebelumnya. Lanjutkan eksekusi sekarang. Daftar lengkap akun, kategori, dan label beserta ID valid sudah tersedia di blok "DATA REFERENSI MCP TERKINI" pada pesan user. Ambil accountId, categoryId, dan labelIds langsung dari blok itu dengan mencocokkan nama persis/case-insensitive; jangan panggil get_accounts, get_categories, atau get_labels lagi kecuali item benar-benar tidak ada di daftar. Jalankan tool penulisan yang sesuai. Jangan membatalkan aksi hanya karena nama kategori atau label user tidak persis sama dengan data MCP.`;
 
 let mcpClient: MultiServerMCPClient | null = null;
 let cachedTools: DynamicStructuredTool[] | null = null;
 let readOnlyAgent: Awaited<ReturnType<typeof createReactAgent>> | null = null;
 let fullAgent: Awaited<ReturnType<typeof createReactAgent>> | null = null;
+let transactionReferenceCache: { expiresAt: number; text: string } | null = null;
 
 function sanitizeInput(input: unknown): unknown {
   if (input === null || input === undefined) return {};
@@ -106,6 +109,65 @@ async function getWrappedTools(env: Env): Promise<DynamicStructuredTool[]> {
   });
 
   return cachedTools;
+}
+
+function extractStructuredData(result: unknown): Record<string, unknown> {
+  if (!Array.isArray(result)) return {};
+
+  for (const item of result.flat(Infinity)) {
+    if (item && typeof item === "object" && "data" in item) {
+      const data = (item as { data?: unknown }).data;
+      if (data && typeof data === "object") return data as Record<string, unknown>;
+    }
+  }
+  return {};
+}
+
+export async function getTransactionReferenceContext(env: Env): Promise<string> {
+  if (transactionReferenceCache && transactionReferenceCache.expiresAt > Date.now()) {
+    return transactionReferenceCache.text;
+  }
+
+  const tools = await getWrappedTools(env);
+  const accountsTool = tools.find((tool) => tool.name === "get_accounts");
+  const categoriesTool = tools.find((tool) => tool.name === "get_categories");
+  const labelsTool = tools.find((tool) => tool.name === "get_labels");
+  if (!accountsTool || !categoriesTool || !labelsTool) throw new Error("MCP tool akun, kategori, atau label tidak tersedia");
+
+  const [accountsResult, categoriesResult, labelsResult] = await Promise.all([
+    accountsTool.invoke({ limit: 20 }),
+    categoriesTool.invoke({ limit: 200 }),
+    labelsTool.invoke({ limit: 200 }),
+  ]);
+  const accounts = extractStructuredData(accountsResult).accounts;
+  const categories = extractStructuredData(categoriesResult).categories;
+  const labels = extractStructuredData(labelsResult).labels;
+
+  const accountLines = Array.isArray(accounts)
+    ? accounts.filter((account) => account && typeof account === "object" && !(account as { archived?: boolean }).archived)
+      .map((account) => {
+        const item = account as { id?: string; name?: string; currencyCode?: string };
+        return `- ${item.id} | ${item.name} | ${item.currencyCode}`;
+      })
+    : [];
+  const categoryLines = Array.isArray(categories)
+    ? categories.filter((category) => category && typeof category === "object" && !(category as { archived?: boolean }).archived)
+      .map((category) => {
+        const item = category as { id?: string; name?: string; group?: { name?: string }; cardinality?: string };
+        return `- ${item.id} | ${item.name} | grup: ${item.group?.name || "-"} | tipe: ${item.cardinality || "-"}`;
+      })
+    : [];
+  const labelLines = Array.isArray(labels)
+    ? labels.filter((label) => label && typeof label === "object" && !(label as { archived?: boolean }).archived)
+      .map((label) => {
+        const item = label as { id?: string; name?: string };
+        return `- ${item.id} | ${item.name}`;
+      })
+    : [];
+
+  const text = `DATA REFERENSI MCP TERKINI — DAFTAR LENGKAP DAN OTORITATIF (sudah diambil langsung dari MCP). Cocokkan nama case-insensitive dan gunakan ID persis dari daftar ini saat membuat transaksi. Jangan panggil get_accounts/get_categories/get_labels ulang bila item ada di bawah.\n\nAKUN:\n${accountLines.join("\n")}\n\nKATEGORI:\n${categoryLines.join("\n")}\n\nLABEL:\n${labelLines.join("\n")}`;
+  transactionReferenceCache = { expiresAt: Date.now() + 10 * 60 * 1000, text };
+  return text;
 }
 
 function buildLlm(env: Env): ChatOpenAI {

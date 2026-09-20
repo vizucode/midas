@@ -2,7 +2,7 @@ import type { Bot } from "grammy";
 import type { BaseMessage } from "@langchain/core/messages";
 import type { Env } from "../../config/env";
 import { getConversationState, saveConversationState, saveIntent } from "../../lib/db";
-import { classifyScope, getAgentTools, invokeAgent } from "../../lib/langchain";
+import { classifyScope, getAgentTools, getTransactionReferenceContext, invokeAgent } from "../../lib/langchain";
 
 const CONFIRM_PATTERN = /\b(konfirmasi|ya,?\s*(catat|simpan)|lanjutkan|setuju)\b/i;
 const NEEDS_CONFIRMATION_MARKER = "[BUTUH_KONFIRMASI]";
@@ -30,7 +30,7 @@ function textContent(message: BaseMessage): string {
     .trim();
 }
 
-async function askAgent(env: Env, prompt: string, chatId: string): Promise<string> {
+async function askAgent(env: Env, prompt: string, chatId: string, includeReference: boolean): Promise<string> {
   const state = await getConversationState(env, chatId);
   const awaitingConfirmation = state?.lastIntent === "await_confirmation" && !!state.lastParams;
   const userConfirmed = CONFIRM_PATTERN.test(prompt);
@@ -42,9 +42,18 @@ async function askAgent(env: Env, prompt: string, chatId: string): Promise<strin
     ? `Konteks percakapan terakhir: tool=${state.lastTool}, params=${state.lastParams || "-"}. Pakai hanya untuk memahami follow-up, bukan sumber data.`
     : "";
 
+  let reference = "";
+  if (includeReference || runConfirmed) {
+    try {
+      reference = await getTransactionReferenceContext(env);
+    } catch (error) {
+      console.error("[Reference] Gagal memuat akun/kategori:", error instanceof Error ? error.message : error);
+    }
+  }
+
   const result = await invokeAgent(
     env,
-    `${context}\nHari ini ${todayWib()} (WIB).\n\n${effectivePrompt}`.trim(),
+    `${reference}\n\n${context}\nHari ini ${todayWib()} (WIB).\n\n${effectivePrompt}`.trim(),
     runConfirmed,
   );
 
@@ -102,7 +111,7 @@ export function registerMessageHandler(bot: Bot, env: Env): void {
 
       answer = scope === "out_of_scope"
         ? "Saya hanya membantu keuangan pribadi: saldo, transaksi, pengeluaran, pemasukan, budget, dan analisis keuangan."
-        : await askAgent(env, prompt, String(ctx.chat.id));
+        : await askAgent(env, prompt, String(ctx.chat.id), scope === "finance");
     } catch (error) {
       const detail = error instanceof Error ? error.message : "error tidak dikenal";
       answer = detail.includes("Recursion limit")
