@@ -39,6 +39,6 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     MCP_SERVER_AUTH_HEADER: get("MCP_SERVER_AUTH_HEADER") || "Bearer",
     TURSO_HOST: get("TURSO_HOST")!,
     TURSO_TOKEN: get("TURSO_TOKEN")!,
-    AGENT_RECURSION_LIMIT: Number(get("AGENT_RECURSION_LIMIT")) || 15,
+    AGENT_RECURSION_LIMIT: Number(get("AGENT_RECURSION_LIMIT")) || 8,
   };
 }

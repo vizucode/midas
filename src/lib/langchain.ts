@@ -6,7 +6,9 @@ import type { Env } from "../config/env";
 
 export const WRITE_TOOL_PATTERN = /^(create|update|delete|remove|edit|set|add)_/i;
 
-const BASE_PROMPT = `Kamu asisten keuangan pribadi di Telegram. Jawab dalam Bahasa Indonesia, rapi, pakai bold untuk angka penting dan bullet singkat. Pakai emoji yang relevan: 💸 pengeluaran, 💰 pemasukan/saldo, 📊 ringkasan, 📭 data kosong, ✅ sukses, ⚠️ peringatan. Semua data keuangan wajib diambil lewat tools yang tersedia; dilarang mengarang angka atau memakai riwayat chat sebagai sumber data. Panggil tool sebanyak yang dibutuhkan sebelum menjawab, lalu berhenti begitu jawaban sudah cukup.
+const BASE_PROMPT = `Kamu asisten keuangan pribadi di Telegram. Jawab dalam Bahasa Indonesia, rapi, pakai bold untuk angka penting dan bullet singkat. Pakai emoji yang relevan: 💸 pengeluaran, 💰 pemasukan/saldo, 📊 ringkasan, 📭 data kosong, ✅ sukses, ⚠️ peringatan. Semua data keuangan wajib diambil lewat tools yang tersedia; dilarang mengarang angka atau memakai riwayat chat sebagai sumber data.
+
+ATURAN TOOL: Panggil tool hanya bila butuh data. Setelah data cukup, langsung beri jawaban final dan jangan panggil tool lagi. Jangan panggil tool yang sama lagi dengan parameter sama atau mirip setelah berhasil. Jika tool error, coba paling banyak sekali lagi dengan parameter berbeda; bila gagal lagi, jelaskan keterbatasannya kepada user. Maksimal empat putaran tool per percakapan.
 
 **PENTING — Rekomendasi Keuangan:**
 Untuk setiap jawaban yang berkaitan dengan data keuangan (saldo, pengeluaran, pemasukan, kategori spending, budget, rata-rata harian, dll), WAJIB tambahkan 1 baris rekomendasi singkat yang relevan dengan angka/fakta yang baru saja ditampilkan. Contoh: jika pengeluaran kategori tertentu tinggi, sarankan evaluasi; jika saldo menipis mendekati akhir bulan, ingatkan persiapan; jika pola pengeluaran wajar, beri apresiasi singkat. Rekomendasi harus spesifik berdasarkan data yang ditunjukkan, BUKAN template generik. Tuliskan di baris baru dengan format: 💡 *Saran:* [isi rekomendasi]. Jangan tambahkan saran untuk jawaban non-finansial (sapaan umum, error, instruksi, permintaan konfirmasi).`;
@@ -19,6 +21,27 @@ let mcpClient: MultiServerMCPClient | null = null;
 let cachedTools: DynamicStructuredTool[] | null = null;
 let readOnlyAgent: Awaited<ReturnType<typeof createReactAgent>> | null = null;
 let fullAgent: Awaited<ReturnType<typeof createReactAgent>> | null = null;
+
+function sanitizeInput(input: unknown): unknown {
+  if (input === null || input === undefined) return {};
+  if (Array.isArray(input)) return input.map(sanitizeInput).filter((value) => value !== undefined);
+  if (typeof input !== "object") return input;
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+
+    if (typeof value === "object" && !Array.isArray(value)) {
+      const nested = sanitizeInput(value) as Record<string, unknown>;
+      if (Object.keys(nested).length > 0) sanitized[key] = nested;
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
 
 async function initMcpClient(env: Env): Promise<MultiServerMCPClient> {
   if (mcpClient) return mcpClient;
@@ -49,15 +72,34 @@ async function getWrappedTools(env: Env): Promise<DynamicStructuredTool[]> {
       description: tool.description || tool.name,
       schema: tool.schema,
       func: async (input: unknown, config?: unknown) => {
-        console.log(`[LangChain Tool] Calling ${tool.name}:`, JSON.stringify(input));
+        const rawInput = JSON.stringify(input);
+        const sanitized = sanitizeInput(input);
+        const sanitizedInput = JSON.stringify(sanitized);
+        console.log(`[LangChain Tool] Calling ${tool.name}:`, sanitizedInput);
+        if (rawInput !== sanitizedInput) {
+          console.log(`[LangChain Tool] Sanitized ${tool.name} (dropped empty fields):`, rawInput);
+        }
+
+        const cache = (config as { configurable?: { callCache?: Map<string, string> } } | undefined)?.configurable?.callCache;
+        const cacheKey = `${tool.name}:${sanitizedInput}`;
+
+        if (cache?.has(cacheKey)) {
+          console.log(`[LangChain Tool] Duplicate call blocked ${tool.name}`);
+          return `Panggilan ini sudah dilakukan sebelumnya dengan parameter sama. Hasil sebelumnya:\n${cache.get(cacheKey)}\n\nJANGAN panggil tool lagi. Susun jawaban final sekarang dari data yang sudah ada.`;
+        }
+
         try {
-          const result = await originalFunc(input, config as never);
-          console.log(`[LangChain Tool] Result ${tool.name}:`, typeof result === "string" ? result.slice(0, 200) : result);
+          const result = await originalFunc(sanitized, config as never);
+          const text = typeof result === "string" ? result : JSON.stringify(result);
+          console.log(`[LangChain Tool] Result ${tool.name}:`, text.slice(0, 200));
+          cache?.set(cacheKey, text.slice(0, 4000));
           return result;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           console.error(`[LangChain Tool] Error ${tool.name}:`, detail);
-          return `Error saat memanggil ${tool.name}: ${detail}`;
+          const message = `Error saat memanggil ${tool.name}: ${detail}. Jangan ulangi parameter yang sama; ubah parameter atau jelaskan keterbatasan ini ke user.`;
+          cache?.set(cacheKey, message);
+          return message;
         }
       },
     });
@@ -105,9 +147,10 @@ async function getFullAgent(env: Env) {
 
 export async function invokeAgent(env: Env, prompt: string, confirmed: boolean = false) {
   const agent = confirmed ? await getFullAgent(env) : await getReadOnlyAgent(env);
+  const callCache = new Map<string, string>();
   return agent.invoke(
     { messages: [{ role: "user", content: prompt }] },
-    { recursionLimit: env.AGENT_RECURSION_LIMIT },
+    { recursionLimit: env.AGENT_RECURSION_LIMIT, configurable: { callCache } },
   );
 }
 

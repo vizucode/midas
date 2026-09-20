@@ -91,7 +91,10 @@ export function registerMessageHandler(bot: Bot, env: Env): void {
     try {
       answer = await askAgent(env, ctx.message.text, String(ctx.chat.id));
     } catch (error) {
-      answer = `❌ Gagal memproses: ${error instanceof Error ? error.message : "error tidak dikenal"}`;
+      const detail = error instanceof Error ? error.message : "error tidak dikenal";
+      answer = detail.includes("Recursion limit")
+        ? "🧩 Pertanyaan ini butuh terlalu banyak langkah data. Coba persempit, misalnya sebut akun atau rentang tanggal spesifik."
+        : `❌ Gagal memproses: ${detail}`;
     }
 
     try {
