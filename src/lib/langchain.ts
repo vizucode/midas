@@ -6,7 +6,7 @@ import type { Env } from "../config/env";
 
 export const WRITE_TOOL_PATTERN = /^(create|update|delete|remove|edit|set|add)_/i;
 
-const BASE_PROMPT = `Kamu asisten keuangan pribadi di Telegram. Jawab dalam Bahasa Indonesia, rapi, pakai bold untuk angka penting dan bullet singkat. Pakai emoji yang relevan: 💸 pengeluaran, 💰 pemasukan/saldo, 📊 ringkasan, 📭 data kosong, ✅ sukses, ⚠️ peringatan. Semua data keuangan wajib diambil lewat tools yang tersedia; dilarang mengarang angka atau memakai riwayat chat sebagai sumber data.
+const BASE_PROMPT = `Kamu asisten keuangan pribadi di Telegram. Jawab dalam Bahasa Indonesia, rapi, pakai bold untuk angka penting dan bullet singkat. Pakai emoji yang relevan: 💸 pengeluaran, 💰 pemasukan/saldo, 📊 ringkasan, 📭 data kosong, ✅ sukses, ⚠️ peringatan. Semua data keuangan wajib diambil lewat tools yang tersedia; dilarang mengarang angka atau memakai riwayat chat sebagai sumber data. Jika user bertanya hal di luar keuangan, tolak singkat dan arahkan kembali ke topik keuangan.
 
 ATURAN TOOL: Panggil tool hanya bila butuh data. Setelah data cukup, langsung beri jawaban final dan jangan panggil tool lagi. Jangan panggil tool yang sama lagi dengan parameter sama atau mirip setelah berhasil. Jika tool error, coba paling banyak sekali lagi dengan parameter berbeda; bila gagal lagi, jelaskan keterbatasannya kepada user. Maksimal empat putaran tool per percakapan.
 
@@ -216,12 +216,15 @@ export async function invokeAgent(env: Env, prompt: string, confirmed: boolean =
   );
 }
 
-export async function classifyScope(env: Env, prompt: string): Promise<"finance" | "greeting" | "out_of_scope"> {
+export async function classifyScope(env: Env, prompt: string, conversationContext?: string): Promise<"finance" | "greeting" | "out_of_scope"> {
   const llm = buildLlm(env);
+  const contextNote = conversationContext
+    ? `\n\nKonteks: percakapan sebelumnya bertopik keuangan (kutipan: "${conversationContext.slice(0, 300)}"). Jika pesan user adalah follow-up wajar dari topik ini (minta saran, analisis, klarifikasi, pertanyaan lanjutan), jawab "finance". Jika pesan jelas berganti ke topik lain yang tidak berhubungan (resep, cuaca, coding, dll), tetap jawab "out_of_scope".`
+    : "";
   const response = await llm.invoke([
     {
       role: "system",
-      content: `Klasifikasikan pesan user ke SATU kata persis: "finance" (saldo, transaksi, pengeluaran, pemasukan, budget, tabungan, utang, akun bank/wallet, analisis keuangan pribadi, mencatat/mengubah data keuangan), "greeting" (sapaan, basa-basi singkat, terima kasih), atau "out_of_scope" (topik lain apapun: resep, cuaca, coding, politik, olahraga, dll). Jawab hanya satu kata itu.`,
+      content: `Klasifikasikan pesan user ke SATU kata persis: "finance" (saldo, transaksi, pengeluaran, pemasukan, budget, tabungan, utang, akun bank/wallet, analisis keuangan pribadi, mencatat/mengubah data keuangan), "greeting" (sapaan, basa-basi singkat, terima kasih), atau "out_of_scope" (topik lain apapun: resep, cuaca, coding, politik, olahraga, dll). Jawab hanya satu kata itu.${contextNote}`,
     },
     { role: "user", content: prompt },
   ]);

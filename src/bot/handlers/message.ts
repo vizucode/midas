@@ -7,10 +7,17 @@ import { classifyScope, getAgentTools, getTransactionReferenceContext, invokeAge
 const CONFIRM_PATTERN = /\b(konfirmasi|ya,?\s*(catat|simpan)|lanjutkan|setuju)\b/i;
 const NEEDS_CONFIRMATION_MARKER = "[BUTUH_KONFIRMASI]";
 const GREETING_PATTERN = /^(halo|hai|helo|hello|hi|pagi|siang|sore|malam|terima kasih|makasih)[!.,?\s]*$/i;
-const FINANCE_PATTERN = /\b(saldo|uang|keuangan|finansial|rekening|akun|bank|wallet|transaksi|pengeluaran|belanja|pemasukan|pendapatan|budget|anggaran|tabungan|menabung|utang|hutang|transfer|kategori|label|cashflow|rata-rata|ratarata|biaya|tagihan|investasi|catat|simpan)\b/i;
+const FINANCE_PATTERN = /\b(saldo|uang|keuangan|finansial|rekening|akun|bank|wallet|transaksi|pengeluaran|belanja|pemasukan|pendapatan|budget|anggaran|tabungan|menabung|utang|hutang|transfer|kategori|label|cashflow|rata-rata|ratarata|biaya|tagihan|investasi|catat|simpan|saran|rekomendasi|analisis|hemat|cukup|sisa)\b/i;
+const FRESH_CONVERSATION_MINUTES = 30;
 
 function isFinanceRelated(prompt: string): boolean {
   return GREETING_PATTERN.test(prompt.trim()) || FINANCE_PATTERN.test(prompt);
+}
+
+function isFreshState(updatedAt: string | undefined): boolean {
+  if (!updatedAt) return false;
+  const timestamp = Date.parse(`${updatedAt.replace(" ", "T")}Z`);
+  return Number.isFinite(timestamp) && Date.now() - timestamp < FRESH_CONVERSATION_MINUTES * 60_000;
 }
 
 function todayWib(): string {
@@ -30,7 +37,7 @@ function textContent(message: BaseMessage): string {
     .trim();
 }
 
-async function askAgent(env: Env, prompt: string, chatId: string, includeReference: boolean): Promise<string> {
+async function askAgent(env: Env, prompt: string, chatId: string, includeReference: boolean, replyContext = ""): Promise<string> {
   const state = await getConversationState(env, chatId);
   const awaitingConfirmation = state?.lastIntent === "await_confirmation" && !!state.lastParams;
   const userConfirmed = CONFIRM_PATTERN.test(prompt);
@@ -51,9 +58,13 @@ async function askAgent(env: Env, prompt: string, chatId: string, includeReferen
     }
   }
 
+  const repliedMessage = replyContext
+    ? `Pesan bot yang sedang dibalas (hanya konteks diskusi, bukan sumber data keuangan utama):\n${replyContext.slice(0, 500)}`
+    : "";
+
   const result = await invokeAgent(
     env,
-    `${reference}\n\n${context}\nHari ini ${todayWib()} (WIB).\n\n${effectivePrompt}`.trim(),
+    `${reference}\n\n${context}\n${repliedMessage}\nHari ini ${todayWib()} (WIB).\n\n${effectivePrompt}`.trim(),
     runConfirmed,
   );
 
@@ -105,13 +116,27 @@ export function registerMessageHandler(bot: Bot, env: Env): void {
     let answer: string;
     try {
       const prompt = ctx.message.text;
-      const scope = isFinanceRelated(prompt)
-        ? "finance"
-        : await classifyScope(env, prompt);
+      const chatId = String(ctx.chat.id);
+      const repliedToBot = ctx.message.reply_to_message?.from?.id === ctx.me.id
+        ? ctx.message.reply_to_message?.text || ""
+        : "";
+
+      let scope: "finance" | "greeting" | "out_of_scope";
+      if (isFinanceRelated(prompt)) {
+        scope = "finance";
+      } else if (repliedToBot) {
+        scope = "finance";
+      } else {
+        const state = await getConversationState(env, chatId);
+        const conversationContext = isFreshState(state?.updatedAt)
+          ? state?.lastToolResult || state?.lastParams || "percakapan keuangan sebelumnya"
+          : undefined;
+        scope = await classifyScope(env, prompt, conversationContext);
+      }
 
       answer = scope === "out_of_scope"
         ? "Saya hanya membantu keuangan pribadi: saldo, transaksi, pengeluaran, pemasukan, budget, dan analisis keuangan."
-        : await askAgent(env, prompt, String(ctx.chat.id), scope === "finance");
+        : await askAgent(env, prompt, chatId, scope === "finance", repliedToBot);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "error tidak dikenal";
       answer = detail.includes("Recursion limit")
