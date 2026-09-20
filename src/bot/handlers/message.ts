@@ -5,6 +5,7 @@ import { getConversationState, saveConversationState, saveIntent } from "../../l
 import { getAgentTools, invokeAgent } from "../../lib/langchain";
 
 const CONFIRM_PATTERN = /\b(konfirmasi|ya,?\s*(catat|simpan)|lanjutkan|setuju)\b/i;
+const NEEDS_CONFIRMATION_MARKER = "[BUTUH_KONFIRMASI]";
 
 function todayWib(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -25,19 +26,41 @@ function textContent(message: BaseMessage): string {
 
 async function askAgent(env: Env, prompt: string, chatId: string): Promise<string> {
   const state = await getConversationState(env, chatId);
-  const context = state?.lastTool
+  const awaitingConfirmation = state?.lastIntent === "await_confirmation" && !!state.lastParams;
+  const userConfirmed = CONFIRM_PATTERN.test(prompt);
+
+  const runConfirmed = awaitingConfirmation && userConfirmed;
+  const effectivePrompt = runConfirmed ? state!.lastParams! : prompt;
+
+  const context = !runConfirmed && state?.lastTool
     ? `Konteks percakapan terakhir: tool=${state.lastTool}, params=${state.lastParams || "-"}. Pakai hanya untuk memahami follow-up, bukan sumber data.`
     : "";
+
   const result = await invokeAgent(
     env,
-    `${context}\nHari ini ${todayWib()} (WIB).\n\n${prompt}`.trim(),
-    CONFIRM_PATTERN.test(prompt),
+    `${context}\nHari ini ${todayWib()} (WIB).\n\n${effectivePrompt}`.trim(),
+    runConfirmed,
   );
+
   const messages = result.messages as BaseMessage[];
   const final = [...messages].reverse().find((message) => message.getType() === "ai");
-  const answer = final ? textContent(final) : "🤔 Maaf, jawaban belum tersedia. Coba jelaskan lebih spesifik.";
+  let answer = final ? textContent(final) : "🤔 Maaf, jawaban belum tersedia. Coba jelaskan lebih spesifik.";
+
   const toolCall = [...messages].reverse().find((message) => message.getType() === "tool");
   const lastTool = toolCall?.name || null;
+
+  if (!runConfirmed && answer.includes(NEEDS_CONFIRMATION_MARKER)) {
+    answer = answer.replace(NEEDS_CONFIRMATION_MARKER, "").trim();
+    answer += "\n\nBalas *konfirmasi* untuk melanjutkan.";
+    await saveConversationState(env, {
+      chatId,
+      lastIntent: "await_confirmation",
+      lastParams: prompt,
+      lastTool: null,
+      lastToolResult: null,
+    });
+    return answer;
+  }
 
   await saveConversationState(env, {
     chatId,
@@ -46,7 +69,7 @@ async function askAgent(env: Env, prompt: string, chatId: string): Promise<strin
     lastTool,
     lastToolResult: toolCall ? textContent(toolCall) : null,
   });
-  if (lastTool) await saveIntent(env, { chatId, intent: lastTool, params: "{}", prompt });
+  if (lastTool) await saveIntent(env, { chatId, intent: lastTool, params: "{}", prompt: effectivePrompt });
 
   return answer;
 }

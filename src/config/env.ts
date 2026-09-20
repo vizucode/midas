@@ -8,6 +8,7 @@ export type Env = {
   MCP_SERVER_AUTH_HEADER: string;
   TURSO_HOST: string;
   TURSO_TOKEN: string;
+  AGENT_RECURSION_LIMIT: number;
 };
 
 const REQUIRED_KEYS = [
@@ -38,5 +39,6 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     MCP_SERVER_AUTH_HEADER: get("MCP_SERVER_AUTH_HEADER") || "Bearer",
     TURSO_HOST: get("TURSO_HOST")!,
     TURSO_TOKEN: get("TURSO_TOKEN")!,
+    AGENT_RECURSION_LIMIT: Number(get("AGENT_RECURSION_LIMIT")) || 15,
   };
 }
