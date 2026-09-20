@@ -2,10 +2,16 @@ import type { Bot } from "grammy";
 import type { BaseMessage } from "@langchain/core/messages";
 import type { Env } from "../../config/env";
 import { getConversationState, saveConversationState, saveIntent } from "../../lib/db";
-import { getAgentTools, invokeAgent } from "../../lib/langchain";
+import { classifyScope, getAgentTools, invokeAgent } from "../../lib/langchain";
 
 const CONFIRM_PATTERN = /\b(konfirmasi|ya,?\s*(catat|simpan)|lanjutkan|setuju)\b/i;
 const NEEDS_CONFIRMATION_MARKER = "[BUTUH_KONFIRMASI]";
+const GREETING_PATTERN = /^(halo|hai|helo|hello|hi|pagi|siang|sore|malam|terima kasih|makasih)[!.,?\s]*$/i;
+const FINANCE_PATTERN = /\b(saldo|uang|keuangan|finansial|rekening|akun|bank|wallet|transaksi|pengeluaran|belanja|pemasukan|pendapatan|budget|anggaran|tabungan|menabung|utang|hutang|transfer|kategori|label|cashflow|rata-rata|ratarata|biaya|tagihan|investasi|catat|simpan)\b/i;
+
+function isFinanceRelated(prompt: string): boolean {
+  return GREETING_PATTERN.test(prompt.trim()) || FINANCE_PATTERN.test(prompt);
+}
 
 function todayWib(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -89,7 +95,14 @@ export function registerMessageHandler(bot: Bot, env: Env): void {
     await ctx.replyWithChatAction("typing");
     let answer: string;
     try {
-      answer = await askAgent(env, ctx.message.text, String(ctx.chat.id));
+      const prompt = ctx.message.text;
+      const scope = isFinanceRelated(prompt)
+        ? "finance"
+        : await classifyScope(env, prompt);
+
+      answer = scope === "out_of_scope"
+        ? "Saya hanya membantu keuangan pribadi: saldo, transaksi, pengeluaran, pemasukan, budget, dan analisis keuangan."
+        : await askAgent(env, prompt, String(ctx.chat.id));
     } catch (error) {
       const detail = error instanceof Error ? error.message : "error tidak dikenal";
       answer = detail.includes("Recursion limit")

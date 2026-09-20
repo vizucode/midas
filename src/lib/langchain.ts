@@ -154,6 +154,22 @@ export async function invokeAgent(env: Env, prompt: string, confirmed: boolean =
   );
 }
 
+export async function classifyScope(env: Env, prompt: string): Promise<"finance" | "greeting" | "out_of_scope"> {
+  const llm = buildLlm(env);
+  const response = await llm.invoke([
+    {
+      role: "system",
+      content: `Klasifikasikan pesan user ke SATU kata persis: "finance" (saldo, transaksi, pengeluaran, pemasukan, budget, tabungan, utang, akun bank/wallet, analisis keuangan pribadi, mencatat/mengubah data keuangan), "greeting" (sapaan, basa-basi singkat, terima kasih), atau "out_of_scope" (topik lain apapun: resep, cuaca, coding, politik, olahraga, dll). Jawab hanya satu kata itu.`,
+    },
+    { role: "user", content: prompt },
+  ]);
+  const raw = typeof response.content === "string" ? response.content : JSON.stringify(response.content);
+  const label = raw.toLowerCase();
+  if (label.includes("finance")) return "finance";
+  if (label.includes("greeting")) return "greeting";
+  return "out_of_scope";
+}
+
 export async function getAgentTools(env: Env) {
   return getWrappedTools(env);
 }
