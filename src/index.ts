@@ -1,3 +1,6 @@
+import { initAgent } from "./core/services/agent.service";
 import { startTelegramBot } from "./platforms/telegram/bot";
 
-startTelegramBot();
+let agent = await initAgent();
+
+startTelegramBot(agent);
