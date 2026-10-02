@@ -11,7 +11,7 @@ export async function getMcpTools() {
 
     mcpClient ??= new MultiServerMCPClient({
         mcpServers: {
-            primary: { url, headers },
+            budgetBakers: { url, headers },
         },
     });
 
