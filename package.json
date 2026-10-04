@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts"
+    "start": "bun src/index.ts",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest"
@@ -17,6 +18,7 @@
     "@langchain/mcp-adapters": "^1.1.4",
     "@langchain/openai": "^1.6.0",
     "langchain": "^1.5.14",
-    "telegraf": "^4.16.3"
+    "telegraf": "^4.16.3",
+    "zod": "^4.6.5"
   }
 }
