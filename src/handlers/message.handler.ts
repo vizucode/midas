@@ -18,6 +18,10 @@ export async function handleMessage(agent: FinancialAgent, userId: string | numb
                 : error,
         });
 
+        if (error instanceof Error && error.message === "MCP tool call limit reached") {
+            return "Wallet memerlukan terlalu banyak query untuk permintaan ini. Coba minta laporan dengan rentang atau kategori yang lebih spesifik.";
+        }
+
         return "Wallet tidak dapat memproses permintaan saat ini. Coba lagi nanti.";
     }
 }

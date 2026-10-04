@@ -15,12 +15,15 @@ export async function chatUsecase(
                 messages: [
                     {
                         role: "system",
-                        content: `Current date: ${new Date().toISOString().slice(0, 10)}. Reply in the user's language. Resolve relative date expressions in any language into exact ISO-8601 date ranges before calling tools. Ask for dates only when the request is ambiguous.`,
+                        content: `Current date: ${new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta" }).format(new Date())}. Time zone: Asia/Jakarta. Reply in the user's language. Resolve relative date expressions in any language into exact ISO-8601 date ranges before calling tools. For financial reports, "last N months" always means the N full calendar months before the current month; do not ask for confirmation. "past N months" means a rolling range ending today. Ask for dates only when no standard interpretation applies.`,
                     },
                     { role: "user", content: message },
                 ],
             },
-            { configurable: { thread_id: userId.toString() } },
+            {
+                configurable: { thread_id: userId.toString() },
+                recursionLimit: 12,
+            },
         );
     } catch (error) {
         logger.error("agent invocation failed", {
@@ -31,6 +34,8 @@ export async function chatUsecase(
         });
         throw error;
     }
+
+    logger.debug("agent response", { userId, result });
 
     const failedTools = result.messages
         .filter(ToolMessage.isInstance)
