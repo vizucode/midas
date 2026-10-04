@@ -7,9 +7,13 @@ export async function handleMessage(agent: FinancialAgent, userId: string | numb
 
     try {
         const response = await chatUsecase(agent, userId, message);
-        logger.info("message responded", { userId, response });
+        const plainResponse = response
+            .replaceAll(/\*\*(.*?)\*\*/g, "$1")
+            .replaceAll(/`([^`]+)`/g, "$1")
+            .replaceAll(/^\s*-\s+/gm, "• ");
+        logger.info("message responded", { userId, response: plainResponse });
 
-        return response;
+        return plainResponse;
     } catch (error) {
         logger.error("message handling failed", {
             userId,
