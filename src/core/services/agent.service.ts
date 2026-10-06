@@ -5,6 +5,19 @@ import { createAgent, createMiddleware, humanInTheLoopMiddleware } from "langcha
 import { getMcpTools } from "./mcp.service";
 import { logger } from "../../utils/logger";
 
+const MAX_TOOL_CALLS = 30;
+
+function stableStringify(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+    if (value && typeof value === "object") {
+        return `{${Object.entries(value as Record<string, unknown>)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+            .join(",")}}`;
+    }
+    return JSON.stringify(value);
+}
+
 const writeTools = [
     "create_records",
     "create_account",
@@ -25,7 +38,21 @@ export function createFinancialAgent(
 ) {
     return createAgent({
         model,
-        systemPrompt: "You are a financial assistant. Never include optional fields when their value is empty, null, unknown, or invalid. Only send optional enum fields with an allowed value. For a request listing transactions and finding the largest category, make exactly two calls: get_records without categoryGroup, then get_records_aggregation once with category:name grouping and baseAmount:absSum. For spending-by-category reports, call get_records_aggregation once with the requested date range, category:name grouping, and baseAmount:absSum; omit categoryGroup unless user explicitly requests one group. Do not call get_client_profile unless user asks about their profile, permissions, sync, or settings. After receiving sufficient tool data, stop calling tools and answer the user. For every response, write naturally and warmly in the user's language: lead with a useful financial insight, then concise details. Use plain text suitable for Telegram; do not use Markdown syntax, raw API data, or technical jargon. For account lists, mention total balance, highlight largest or notable balances, group zero-balance accounts separately, and end with one useful follow-up question. For errors, explain clearly what could not be completed and suggest a practical next step. For confirmations, state the action, amount, account, and date plainly. Never report zero or no data when a tool returns an error.",
+        systemPrompt: `You are a financial assistant.
+        - Never include optional fields when their value is empty, null, unknown, or invalid.
+        - Only send optional enum fields with an allowed value.
+        - For all-transactions requests, omit both categoryId and categoryGroup. Never invent a category filter or query every category separately.
+        - For a specific category, call get_categories to resolve its actual name and ID, including custom categories. Use the matching categoryId according to the tool input schema; never invent an ID. If no category matches or multiple categories match, ask the user to clarify before querying transactions.
+        - Do not use categoryGroup with get_records. Its response already includes each transaction's category. Never split an all-transactions request into separate calls per category.
+        - For a request listing transactions and finding the largest category, use one get_records call and one get_records_aggregation call with category:name grouping and baseAmount:absSum. Preserve any explicitly requested categoryId resolved from get_categories.
+        - For spending across all categories, use get_records_aggregation with the requested date range, category:name grouping, and baseAmount:absSum without categoryId or categoryGroup.
+        - Do not call get_client_profile unless user asks about their profile, permissions, sync, or settings.
+        - After receiving sufficient tool data, stop calling tools and answer the user.
+        - For every response, write naturally and warmly in the user's language: lead with a useful financial insight, then concise details. Use plain text suitable for Telegram; do not use Markdown syntax, raw API data, or technical jargon.
+        - For account lists, mention total balance, highlight largest or notable balances, group zero-balance accounts separately, and end with one useful follow-up question.
+        - For errors, explain clearly what could not be completed and suggest a practical next step. For confirmations, state the action, amount, account, and date plainly.
+        - Never report zero or no data when a tool returns an error.
+        - Always respond in Indonesian. Use a relaxed, natural, friendly-professional tone; use slang only when it fits naturally, never force it. Keep tool names, field names, enum values, dates, and numeric arguments exactly as required by the MCP schema. Never translate or alter tool arguments.`,
         tools,
         checkpointer: new MemorySaver(),
         middleware: [
@@ -50,19 +77,16 @@ export function createFinancialAgent(
                     const priorToolCalls = priorMessages
                         .filter(AIMessage.isInstance)
                         .flatMap((message: AIMessage) => message.tool_calls ?? []);
-                    const hasCategoryAggregation = priorToolCalls.some(
-                        (call: { name: string; args: Record<string, unknown> }) =>
-                            call.name === "get_records_aggregation"
-                            && Array.isArray(call.args.groupBy)
-                            && call.args.groupBy.includes("category:name"),
-                    );
-
                     if (
-                        (request.toolCall.name === "get_records_aggregation"
-                            && Array.isArray(args.groupBy)
-                            && args.groupBy.includes("category:name"))
-                        || (request.toolCall.name === "get_records" && hasCategoryAggregation)
+                        request.toolCall.name === "get_records_aggregation"
+                        && Array.isArray(args.groupBy)
+                        && args.groupBy.includes("category:name")
                     ) {
+                        delete args.categoryId;
+                        delete args.categoryGroup;
+                    }
+
+                    if (request.toolCall.name === "get_records") {
                         delete args.categoryGroup;
                     }
 
@@ -84,10 +108,10 @@ export function createFinancialAgent(
                         });
                     }
 
-                    const callKey = `${request.toolCall.name}:${JSON.stringify(args)}`;
+                    const callKey = `${request.toolCall.name}:${stableStringify(args)}`;
                     const matchingCallCount = priorToolCalls.filter(
                         (call: { name: string; args: unknown }) =>
-                            `${call.name}:${JSON.stringify(call.args)}` === callKey,
+                            `${call.name}:${stableStringify(call.args)}` === callKey,
                     ).length;
                     if (matchingCallCount > 1) {
                         logger.warn("duplicate mcp tool call blocked", {
@@ -103,17 +127,13 @@ export function createFinancialAgent(
                             (count: number, message: AIMessage) => count + (message.tool_calls?.length ?? 0),
                             0,
                         );
-                    if (toolCallCount >= 4) {
-                        logger.warn("mcp tool call limit reached", {
+                    if (toolCallCount >= MAX_TOOL_CALLS) {
+                        logger.error("mcp execution budget exhausted", {
                             toolName: request.toolCall.name,
                             toolCallCount,
+                            maxToolCalls: MAX_TOOL_CALLS,
                         });
-                        return new ToolMessage({
-                            content: "Tool call limit reached. Use data from previous tool results and answer the user now.",
-                            tool_call_id: request.toolCall.id ?? request.toolCall.name ?? "mcp-tool",
-                            name: request.toolCall.name,
-                            status: "success",
-                        });
+                        throw new Error(`MCP execution budget exhausted after ${MAX_TOOL_CALLS} tool calls`);
                     }
 
                     const sanitizedRequest = {

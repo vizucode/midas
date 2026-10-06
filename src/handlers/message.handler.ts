@@ -1,19 +1,19 @@
 import type { FinancialAgent } from "../core/services/agent.service";
-import { chatUsecase } from "../core/usecases/chat.usecase";
+import { chatUsecase, type ChatResult } from "../core/usecases/chat.usecase";
 import { logger } from "../utils/logger";
 
-export async function handleMessage(agent: FinancialAgent, userId: string | number, message: string) {
+export async function handleMessage(agent: FinancialAgent, userId: string | number, message: string): Promise<ChatResult> {
     logger.info("message received", { userId, message });
 
     try {
         const response = await chatUsecase(agent, userId, message);
-        const plainResponse = response
+        const plainResponse = response.text
             .replaceAll(/\*\*(.*?)\*\*/g, "$1")
             .replaceAll(/`([^`]+)`/g, "$1")
             .replaceAll(/^\s*-\s+/gm, "• ");
         logger.info("message responded", { userId, response: plainResponse });
 
-        return plainResponse;
+        return { ...response, text: plainResponse };
     } catch (error) {
         logger.error("message handling failed", {
             userId,
@@ -23,9 +23,9 @@ export async function handleMessage(agent: FinancialAgent, userId: string | numb
         });
 
         if (error instanceof Error && error.message === "MCP tool call limit reached") {
-            return "Wallet memerlukan terlalu banyak query untuk permintaan ini. Coba minta laporan dengan rentang atau kategori yang lebih spesifik.";
+            return { text: "Wallet memerlukan terlalu banyak query untuk permintaan ini. Coba minta laporan dengan rentang atau kategori yang lebih spesifik." };
         }
 
-        return "Wallet tidak dapat memproses permintaan saat ini. Coba lagi nanti.";
+        return { text: "Wallet tidak dapat memproses permintaan saat ini. Coba lagi nanti." };
     }
 }

@@ -87,6 +87,67 @@ describe("financial agent MCP tools", () => {
         expect(run).toHaveBeenCalledWith({ limit: 10 }, expect.anything());
     });
 
+    test("removes categoryGroup for all transaction queries", async () => {
+        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
+            async () => "records",
+        );
+        const model = fakeModel()
+            .respondWithTools([{
+                name: "get_records",
+                args: { recordDate: ["eq.2026-10-05"], recordType: "expense", categoryGroup: "housing" },
+                id: "all-records",
+            }])
+            .respond(new AIMessage("Done"));
+        const agent = createFinancialAgent(model, [makeTool("get_records", run)]);
+
+        await agent.invoke(
+            { messages: [{ role: "user", content: "Pengeluaran kemarin" }] },
+            { configurable: { thread_id: "all-records" } },
+        );
+
+        expect(run).toHaveBeenCalledWith(
+            { recordDate: ["eq.2026-10-05"], recordType: "expense" },
+            expect.anything(),
+        );
+    });
+
+    test("preserves categoryId for custom categories", async () => {
+        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
+            async () => "records",
+        );
+        const model = fakeModel()
+            .respondWithTools([{ name: "get_records", args: { categoryId: "custom-id", categoryGroup: "unknown_records" }, id: "category_call" }])
+            .respond(new AIMessage("Done"));
+        const agent = createFinancialAgent(model, [makeTool("get_records", run)]);
+
+        await agent.invoke(
+            { messages: [{ role: "user", content: "Transaksi kategori custom" }] },
+            { configurable: { thread_id: "custom-category" } },
+        );
+
+        expect(run).toHaveBeenCalledWith(
+            { categoryId: "custom-id" },
+            expect.anything(),
+        );
+    });
+
+    test("removes categoryGroup from all-transaction aggregation", async () => {
+        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
+            async () => "aggregation",
+        );
+        const model = fakeModel()
+            .respondWithTools([{ name: "get_records_aggregation", args: { groupBy: ["category:name"], categoryGroup: "food_and_drinks" }, id: "all_call" }])
+            .respond(new AIMessage("Done"));
+        const agent = createFinancialAgent(model, [makeTool("get_records_aggregation", run)]);
+
+        await agent.invoke(
+            { messages: [{ role: "user", content: "Semua transaksi" }] },
+            { configurable: { thread_id: "all-category" } },
+        );
+
+        expect(run).toHaveBeenCalledWith({ groupBy: ["category:name"] }, expect.anything());
+    });
+
     test("removes categoryGroup and stops repeated category aggregation", async () => {
         const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
             async () => "aggregation result",
