@@ -6,6 +6,11 @@ import { getMcpTools } from "./mcp.service";
 import { logger } from "../../utils/logger";
 
 const MAX_TOOL_CALLS = 30;
+const checkpointers = new WeakMap<object, MemorySaver>();
+
+export async function clearAgentThread(agent: FinancialAgent, userId: string | number) {
+    await checkpointers.get(agent)?.deleteThread(userId.toString());
+}
 
 function stableStringify(value: unknown): string {
     if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -36,7 +41,8 @@ export function createFinancialAgent(
     model: Parameters<typeof createAgent>[0]["model"],
     tools: Awaited<ReturnType<typeof getMcpTools>>,
 ) {
-    return createAgent({
+    const checkpointer = new MemorySaver();
+    const agent = createAgent({
         model,
         systemPrompt: `You are a financial assistant.
         - Never include optional fields when their value is empty, null, unknown, or invalid.
@@ -54,7 +60,7 @@ export function createFinancialAgent(
         - Never report zero or no data when a tool returns an error.
         - Always respond in Indonesian. Use a relaxed, natural, friendly-professional tone; use slang only when it fits naturally, never force it. Keep tool names, field names, enum values, dates, and numeric arguments exactly as required by the MCP schema. Never translate or alter tool arguments.`,
         tools,
-        checkpointer: new MemorySaver(),
+        checkpointer,
         middleware: [
             createMiddleware({
                 name: "mcpInputGuard",
@@ -181,6 +187,8 @@ export function createFinancialAgent(
             }),
         ],
     });
+    checkpointers.set(agent, checkpointer);
+    return agent;
 }
 
 export async function initAgent() {

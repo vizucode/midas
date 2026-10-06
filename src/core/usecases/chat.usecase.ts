@@ -1,6 +1,6 @@
 import { Command } from "@langchain/langgraph";
 import { ToolMessage } from "@langchain/core/messages";
-import type { FinancialAgent } from "../services/agent.service";
+import { clearAgentThread, type FinancialAgent } from "../services/agent.service";
 import { classifyFinanceScope } from "../services/finance.guardrail";
 import { logger } from "../../utils/logger";
 
@@ -46,13 +46,16 @@ export async function resumeChat(
             120_000,
         );
 
-        return extractChatResult(result, threadId, interruptId);
+        const response = extractChatResult(result, threadId, interruptId);
+        if (!response.approval) await clearAgentThread(agent, userId);
+        return response;
     } catch (error) {
         logger.error("approval resume failed", {
             userId,
             decision,
             error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : error,
         });
+        await clearAgentThread(agent, userId);
         return { text: "Transaksi belum berubah karena server keuangan gagal memproses permintaan. Coba lagi nanti." };
     }
 }
@@ -198,8 +201,11 @@ export async function chatUsecase(
     }
 
     if (failedTools.length > 0) {
+        await clearAgentThread(agent, userId);
         return { text: "Wallet tidak dapat menyelesaikan permintaan karena error validasi. Coba ulangi dengan detail yang lebih spesifik." };
     }
 
-    return extractChatResult(result, userId.toString());
+    const response = extractChatResult(result, userId.toString());
+    if (!response.approval) await clearAgentThread(agent, userId);
+    return response;
 }
