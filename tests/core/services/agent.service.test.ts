@@ -1,247 +1,62 @@
-import { describe, expect, mock, test } from "bun:test";
-import { Command } from "@langchain/langgraph";
-import { AIMessage } from "@langchain/core/messages";
-import { tool } from "@langchain/core/tools";
-import { fakeModel } from "langchain";
+import { afterEach, describe, expect, test } from "bun:test";
+import { Agent } from "@mastra/core/agent";
+import { Mastra } from "@mastra/core";
+import { LibSQLStore } from "@mastra/libsql";
+import { createTool } from "@mastra/core/tools";
+import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 import { z } from "zod";
-import { createFinancialAgent } from "../../../src/core/services/agent.service";
+import { ApprovalStore, canonical, fingerprint } from "../../../src/core/services/approval.store";
 
-const readTools = [
-    "get_client_profile",
-    "get_records",
-    "get_accounts",
-    "get_categories",
-    "get_budgets",
-    "get_labels",
-    "get_records_aggregation",
-    "get_entity",
-    "get_references",
-];
+const url = () => `file:/tmp/midas-${crypto.randomUUID()}.db`;
+const stores: ApprovalStore[] = [];
+const make = async () => { const store = new ApprovalStore(url(), undefined, 60000, 60000); await store.init(); stores.push(store); return store; };
+afterEach(() => stores.splice(0).forEach(store => store.close()));
 
-const writeTools = [
-    "create_records",
-    "create_account",
-    "create_budget",
-    "create_category",
-    "create_label",
-    "patch_records",
-    "patch_accounts",
-    "patch_budgets",
-    "patch_categories",
-    "patch_labels",
-    "delete_documents",
-];
-
-type ToolRun = ReturnType<typeof mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>>;
-
-function makeTool(name: string, run: ToolRun) {
-    return tool(run, {
-        name,
-        description: `${name} test tool`,
-        schema: z.object({}).passthrough(),
+describe("durable financial approval", () => {
+    test("native Mastra approval persists across store restart", async () => {
+        const database = url();
+        let writes = 0;
+        const tool = createTool({ id: "write", description: "Write fixture", inputSchema: z.object({ amount: z.number() }), requireApproval: true, execute: async () => { writes++; return { saved: true }; } });
+        const makeModel = (call: boolean) => new MastraLanguageModelV2Mock({ doGenerate: async () => ({ content: call ? [{ type: "tool-call", toolCallId: "call-1", toolName: "write", input: '{"amount":1}' }] : [{ type: "text", text: "Done" }], finishReason: call ? "tool-calls" : "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, warnings: [] }) });
+        const firstStorage = new LibSQLStore({ id: "first", url: database });
+        const first = new Agent({ id: "native-test", name: "Native test", instructions: "Test", model: makeModel(true), tools: { write: tool } });
+        new Mastra({ agents: { first }, storage: firstStorage });
+        const pending = await first.generate("Write amount one", { maxSteps: 1 });
+        expect(pending.finishReason).toBe("suspended");
+        expect(writes).toBe(0);
+        await firstStorage.close();
+        const secondStorage = new LibSQLStore({ id: "second", url: database });
+        const second = new Agent({ id: "native-test", name: "Native test", instructions: "Test", model: makeModel(false), tools: { write: tool } });
+        new Mastra({ agents: { second }, storage: secondStorage });
+        await second.approveToolCallGenerate({ runId: pending.runId!, toolCallId: "call-1", maxSteps: 1 });
+        expect(writes).toBe(1);
+        await secondStorage.close();
     });
-}
-
-function createTestAgent(name: string, run: ToolRun, final = "Done") {
-    const model = fakeModel()
-        .respondWithTools([{ name, args: { fixture: true }, id: "call_1" }])
-        .respond(new AIMessage(final));
-
-    return createFinancialAgent(model, [makeTool(name, run)]);
-}
-
-describe("financial agent MCP tools", () => {
-    for (const name of readTools) test(`calls read tool ${name} without confirmation`, async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "tool response",
-        );
-        const agent = createTestAgent(name, run, `${name} complete`);
-
-        const result = await agent.invoke(
-            { messages: [{ role: "user", content: `Use ${name}` }] },
-            { configurable: { thread_id: name } },
-        );
-
-        expect(run).toHaveBeenCalledWith({ fixture: true }, expect.anything());
-        expect(result.messages.at(-1)?.content).toBe(`${name} complete`);
+    test("canonical fingerprints bind exact arguments", () => {
+        expect(canonical({ b: 2, a: 1 })).toBe(canonical({ a: 1, b: 2 }));
+        expect(fingerprint("write", { amount: 1 }, "v1")).not.toBe(fingerprint("write", { amount: 2 }, "v1"));
     });
-
-    test("removes empty optional enum fields before calling MCP", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "tool response",
-        );
-        const model = fakeModel()
-            .respondWithTools([{
-                name: "get_client_profile",
-                args: { help: [""], source: ["", "  "], recordState: null, accountId: "", categoryId: null, limit: 10 },
-                id: "call_1",
-            }])
-            .respond(new AIMessage("Done"));
-        const agent = createFinancialAgent(model, [makeTool("get_client_profile", run)]);
-
-        await agent.invoke(
-            { messages: [{ role: "user", content: "Get profile" }] },
-            { configurable: { thread_id: "filter-guard" } },
-        );
-
-        expect(run).toHaveBeenCalledWith({ limit: 10 }, expect.anything());
+    test("claims once and rejects wrong owner or chat", async () => {
+        const store = await make(); const run = await store.start("u1", "c1"); await store.finish(run, "waiting"); const id = await store.pending(run, "native", "call", "write", { amount: 1 }, "v1");
+        expect(await store.claim(id, "u2", "c1", true)).toBeUndefined();
+        expect(await store.claim(id, "u1", "c2", true)).toBeUndefined();
+        expect(await store.claim(id, "u1", "c1", true)).toMatchObject({ run, call_id: "call" });
+        expect(await store.claim(id, "u1", "c1", true)).toBeUndefined();
     });
-
-    test("removes categoryGroup for all transaction queries", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "records",
-        );
-        const model = fakeModel()
-            .respondWithTools([{
-                name: "get_records",
-                args: { recordDate: ["eq.2026-10-05"], recordType: "expense", categoryGroup: "housing" },
-                id: "all-records",
-            }])
-            .respond(new AIMessage("Done"));
-        const agent = createFinancialAgent(model, [makeTool("get_records", run)]);
-
-        await agent.invoke(
-            { messages: [{ role: "user", content: "Pengeluaran kemarin" }] },
-            { configurable: { thread_id: "all-records" } },
-        );
-
-        expect(run).toHaveBeenCalledWith(
-            { recordDate: ["eq.2026-10-05"], recordType: "expense" },
-            expect.anything(),
-        );
+    test("reopened database preserves pending approval", async () => {
+        const database = url(); const first = new ApprovalStore(database); await first.init(); const run = await first.start("u", "c"); await first.finish(run, "waiting"); const id = await first.pending(run, "native", "call", "write", {}, "v1"); first.close();
+        const second = new ApprovalStore(database); await second.init(); expect(await second.claim(id, "u", "c", false)).toMatchObject({ run }); second.close();
     });
-
-    test("preserves categoryId for custom categories", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "records",
-        );
-        const model = fakeModel()
-            .respondWithTools([{ name: "get_records", args: { categoryId: "custom-id", categoryGroup: "unknown_records" }, id: "category_call" }])
-            .respond(new AIMessage("Done"));
-        const agent = createFinancialAgent(model, [makeTool("get_records", run)]);
-
-        await agent.invoke(
-            { messages: [{ role: "user", content: "Transaksi kategori custom" }] },
-            { configurable: { thread_id: "custom-category" } },
-        );
-
-        expect(run).toHaveBeenCalledWith(
-            { categoryId: "custom-id" },
-            expect.anything(),
-        );
+    test("deduplicates delivery", async () => { const store = await make(); expect(await store.delivery("1")).toBe(true); expect(await store.delivery("1")).toBe(false); });
+    test("binds execution to claimed exact call", async () => {
+        const store = await make(); const run = await store.start("u", "c"); await store.finish(run, "waiting"); const id = await store.pending(run, "native", "call", "write", { amount: 1 }, "v1"); await store.claim(id, "u", "c", true);
+        await expect(store.execute(run, "u", "c", "native", "call", "write", { amount: 2 }, "v1", true, "changed")).rejects.toThrow("Approval mismatch");
+        await expect(store.execute(run, "u", "c", "native", "call", "write", { amount: 1 }, "v1", true, "exact")).resolves.toBeUndefined();
+        await expect(store.execute(run, "u", "c", "native", "call", "write", { amount: 1 }, "v1", true, "again")).rejects.toThrow("Approval mismatch");
     });
-
-    test("removes categoryGroup from all-transaction aggregation", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "aggregation",
-        );
-        const model = fakeModel()
-            .respondWithTools([{ name: "get_records_aggregation", args: { groupBy: ["category:name"], categoryGroup: "food_and_drinks" }, id: "all_call" }])
-            .respond(new AIMessage("Done"));
-        const agent = createFinancialAgent(model, [makeTool("get_records_aggregation", run)]);
-
-        await agent.invoke(
-            { messages: [{ role: "user", content: "Semua transaksi" }] },
-            { configurable: { thread_id: "all-category" } },
-        );
-
-        expect(run).toHaveBeenCalledWith({ groupBy: ["category:name"] }, expect.anything());
-    });
-
-    test("removes categoryGroup and stops repeated category aggregation", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "aggregation result",
-        );
-        const model = fakeModel()
-            .respondWithTools([{ name: "get_records_aggregation", args: { groupBy: ["category:name"], categoryGroup: "shopping" }, id: "call_1" }])
-            .respond(new AIMessage("Report complete"));
-        const agent = createFinancialAgent(model, [makeTool("get_records_aggregation", run)]);
-
-        const result = await agent.invoke(
-            { messages: [{ role: "user", content: "Spending by category" }] },
-            { configurable: { thread_id: "category-report" }, recursionLimit: 12 },
-        );
-
-        expect(result.messages.at(-1)?.content).toBe("Report complete");
-        expect(run).toHaveBeenCalledWith({ groupBy: ["category:name"] }, expect.anything());
-    });
-
-    test("exposes structured MCP artifacts as tool content", async () => {
-        const model = fakeModel()
-            .respondWithTools([{ name: "get_records_aggregation", args: {}, id: "artifact_call" }])
-            .respond(new AIMessage("Done"));
-        const resultTool = tool(async () => ({
-            content: [],
-            artifact: [{ data: { results: [{ total: 42 }] } }],
-        }), {
-            name: "get_records_aggregation",
-            description: "Aggregation",
-            schema: z.object({}),
-        });
-        const agent = createFinancialAgent(model, [resultTool]);
-        const result = await agent.invoke(
-            { messages: [{ role: "user", content: "Report" }] },
-            { configurable: { thread_id: "artifact" } },
-        );
-
-        expect(result.messages.at(-1)?.content).toBe("Done");
-    });
-
-    test("blocks duplicate MCP tool calls before recursion limit", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "tool response",
-        );
-        const model = fakeModel()
-            .respondWithTools([{ name: "get_records", args: {}, id: "call_1" }])
-            .respondWithTools([{ name: "get_records", args: {}, id: "call_2" }]);
-        const agent = createFinancialAgent(model, [makeTool("get_records", run)]);
-
-        await expect(agent.invoke(
-            { messages: [{ role: "user", content: "Loop" }] },
-            { configurable: { thread_id: "tool-limit" }, recursionLimit: 12 },
-        )).rejects.toThrow("Duplicate MCP tool call blocked");
-        expect(run).toHaveBeenCalledTimes(1);
-    });
-
-    test("resets duplicate detection for each user message", async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "tool response",
-        );
-        const model = fakeModel()
-            .respondWithTools([{ name: "get_records", args: {}, id: "call_1" }])
-            .respond(new AIMessage("First done"))
-            .respondWithTools([{ name: "get_records", args: {}, id: "call_2" }])
-            .respond(new AIMessage("Second done"));
-        const agent = createFinancialAgent(model, [makeTool("get_records", run)]);
-        const config = { configurable: { thread_id: "multi-turn" } };
-
-        await agent.invoke({ messages: [{ role: "user", content: "First" }] }, config);
-        await agent.invoke({ messages: [{ role: "user", content: "Second" }] }, config);
-
-        expect(run).toHaveBeenCalledTimes(2);
-    });
-
-    for (const name of writeTools) test(`requires confirmation before ${name} executes`, async () => {
-        const run = mock<(args: Record<string, unknown>, config: unknown) => Promise<string>>(
-            async () => "tool response",
-        );
-        const agent = createTestAgent(name, run, `${name} complete`);
-        const config = { configurable: { thread_id: name } };
-
-        const paused = await agent.invoke(
-            { messages: [{ role: "user", content: `Use ${name}` }] },
-            config,
-        );
-
-        expect(paused.__interrupt__).toHaveLength(1);
-        expect(run).not.toHaveBeenCalled();
-
-        const completed = await agent.invoke(
-            new Command({ resume: { decisions: [{ type: "approve" }] } }),
-            config,
-        );
-
-        expect(run).toHaveBeenCalledWith({ fixture: true }, expect.anything());
-        expect(completed.messages.at(-1)?.content).toBe(`${name} complete`);
+    test("enforces thirty execution budget", async () => {
+        const store = await make(); const run = await store.start("u", "c");
+        for (let i = 0; i < 30; i++) await store.execute(run, "u", "c", run, `c${i}`, "read", { i }, "v1", false, String(i));
+        await expect(store.execute(run, "u", "c", run, "c30", "read", {}, "v1", false, "30")).rejects.toThrow("Execution budget exhausted");
     });
 });

@@ -1,24 +1,11 @@
-import { MultiServerMCPClient } from "@langchain/mcp-adapters";
+import { MCPClient } from "@mastra/mcp";
 
-let mcpClient: MultiServerMCPClient | undefined;
-
+let client: MCPClient | undefined;
 export async function getMcpTools() {
-    const url = process.env.MCP_SERVER_URL;
-    if (!url) throw new Error("Missing env: MCP_SERVER_URL");
-
-    const authToken = process.env.MCP_SERVER_AUTH_TOKEN;
-    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : undefined;
-
-    mcpClient ??= new MultiServerMCPClient({
-        mcpServers: {
-            budgetBakers: { url, headers },
-        },
-    });
-
-    return mcpClient.getTools();
+    const endpoint = process.env.MCP_SERVER_URL;
+    if (!endpoint) throw new Error("Missing env: MCP_SERVER_URL");
+    const token = process.env.MCP_SERVER_AUTH_TOKEN;
+    client ??= new MCPClient({ servers: { budgetBakers: { url: new URL(endpoint), requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined, forwardInstructions: false, onToolError: "throw" } } });
+    return client.listTools();
 }
-
-export async function closeMcp() {
-    await mcpClient?.close();
-    mcpClient = undefined;
-}
+export async function closeMcp() { await client?.disconnect(); client = undefined; }

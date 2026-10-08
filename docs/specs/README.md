@@ -29,5 +29,6 @@ The `version:` frontmatter moves with the folder.
 | [Finance Scope and Bot Help](v1.0.0/SPEC-finance-scope-and-bot-help.md) | Draft | v1.0.0 retrospective |
 | [Financial Queries and Reports](v1.0.0/SPEC-financial-queries-and-reports.md) | Draft | v1.0.0 retrospective |
 | [Confirmed Financial Changes](v1.0.0/SPEC-confirmed-financial-changes.md) | Draft | v1.0.0 retrospective |
+| [Mastra Financial Assistant Rebuild](v1.0.1/SPEC-mastra-rebuild.md) | Approved | v1.0.1 migration in progress |
 
 > Add a row here every time you create a new spec.

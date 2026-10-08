@@ -15,10 +15,12 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@langchain/mcp-adapters": "^1.1.4",
-    "@langchain/openai": "^1.6.0",
-    "langchain": "^1.5.14",
-    "telegraf": "^4.16.3",
+    "@ai-sdk/openai-compatible-v5": "npm:@ai-sdk/openai-compatible@1.0.46",
+    "@libsql/client": "^0.18.0",
+    "@mastra/core": "^1.75.0",
+    "@mastra/libsql": "^1.25.1",
+    "@mastra/mcp": "^2.2.0",
+    "hono": "^4.13.13",
     "zod": "^4.6.5"
   }
 }

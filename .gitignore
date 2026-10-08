@@ -1,3 +1,7 @@
 .env
 /node_modules
 /graphify-out
+/data
+*.db
+*.db-shm
+*.db-wal

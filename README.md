@@ -46,7 +46,8 @@ src/
 ## Requirements
 
 - [Bun](https://bun.sh/)
-- Telegram bot token, if running Telegram adapter
+- Telegram bot token, webhook secret, and allowed private-chat sender IDs
+- Persistent libSQL database URL
 
 ## Setup
 
@@ -59,8 +60,22 @@ bun install
 Create `.env` in project root:
 
 ```env
-BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_BOT_TOKEN=replace_me
+TELEGRAM_WEBHOOK_SECRET_TOKEN=replace_me
+TELEGRAM_ALLOWED_USER_IDS=123456789
+NINE_ROUTER_MODEL=replace_me
+NINE_ROUTER_API_KEY=replace_me
+NINE_ROUTER_BASE_URL=https://router.example/v1
+MCP_SERVER_URL=https://wallet.example/mcp
+MCP_SERVER_AUTH_TOKEN=replace_me
+DATABASE_URL=file:./data/midas.db
+DATABASE_AUTH_TOKEN=
+APPROVAL_EXPIRY_MS=86400000
+APPROVAL_RETENTION_MS=2592000000
+PORT=4111
 ```
+
+Only configured Telegram user IDs in private chats are accepted. Group chats and all other senders are ignored. Register Telegram webhook at `https://your-host.example/telegram/webhook` with `TELEGRAM_WEBHOOK_SECRET_TOKEN`. Approval expires after 24 hours; completed metadata is retained for 30 days by default. Local file storage requires persistent disk and one application instance.
 
 Bun loads `.env` automatically.
 
