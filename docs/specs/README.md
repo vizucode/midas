@@ -32,7 +32,7 @@ The `version:` frontmatter moves with the folder.
 | [Mastra Financial Assistant Rebuild](v1.0.1/SPEC-mastra-rebuild.md) | Approved | v1.0.1 migration in progress |
 | [Telegram Webhook Management API](v1.0.1/SPEC-telegram-webhook-management.md) | Implemented | v1.0.1 operations |
 | [Natural Out-of-Scope Replies](v1.0.1/SPEC-natural-out-of-scope-replies.md) | Shipped | v1.0.1 guardrail |
-| [Telegram Memory and Mastra Guardrails](v1.0.1/SPEC-telegram-memory-and-guardrails.md) | Shipped | v1.0.1 memory and security |
+| [Telegram Memory and Mastra Guardrails](v1.0.1/SPEC-telegram-memory-and-guardrails.md) | Shipped | v1.0.1 Turso-backed memory and security |
 | [Readable Code Structure](v1.0.1/SPEC-readable-code-structure.md) | Draft | v1.0.1 maintainability |
 
 > Add a row here every time you create a new spec.

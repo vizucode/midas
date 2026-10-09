@@ -8,6 +8,7 @@ import { getMcpTools, closeMcp } from "./core/services/mcp.service";
 import { ChatService } from "./core/usecases/chat.usecase";
 import { NineRouterGateway } from "./mastra/gateway";
 import { createTelegramRoutes } from "./handlers/telegram.routes";
+import { tursoConfig } from "./mastra/turso";
 import { createTelegramClient } from "./platforms/telegram/client";
 import { logger } from "./utils/logger";
 
@@ -37,6 +38,7 @@ function createContractMap(tools: Awaited<ReturnType<typeof getMcpTools>>) {
     }));
 }
 
+const { host: tursoHost, token: tursoToken } = tursoConfig();
 const token = env("TELEGRAM_BOT_TOKEN");
 const secret = env("TELEGRAM_WEBHOOK_SECRET_TOKEN");
 const allowedIds = (env("TELEGRAM_ALLOWED_USER_IDS") ?? "")
@@ -66,6 +68,25 @@ const store = new ApprovalStore(
 
 await store.init();
 
+const memoryStorage = new LibSQLStore({
+    id: "midas-memory",
+    url: tursoHost,
+    authToken: tursoToken,
+});
+
+try {
+    await memoryStorage.init();
+} catch {
+    await memoryStorage.close();
+    store.close();
+    throw new Error("Unable to initialize Turso memory storage");
+}
+
+memory.setStorage(memoryStorage);
+
+const storage = new LibSQLStore({ id: "midas-storage", url, authToken: auth });
+await storage.init();
+
 const tools = await getMcpTools();
 const agent = await createFinancialAgent(store, tools);
 const contracts = createContractMap(tools);
@@ -89,9 +110,6 @@ const chat = new ChatService(agent, store, contracts, async (text, owner, chatId
 
     return result.text;
 });
-
-const storage = new LibSQLStore({ id: "midas-storage", url, authToken: auth });
-await storage.init();
 
 const mastra = new Mastra({
     agents: { financialAgent: agent, scopeAgent },
@@ -120,7 +138,9 @@ logger.info("service started", { port: listener.port, webhook: "/telegram/webhoo
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, async () => {
+        await memory.settled();
         await mastra.shutdown();
+        await memoryStorage.close();
         await closeMcp();
         store.close();
         listener.stop();

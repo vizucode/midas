@@ -14,6 +14,16 @@ Before implementing any feature or non-trivial change:
 
 Bug fixes and trivial changes may skip a spec when behavior and scope are obvious.
 
+## Code style
+
+- Write human-readable code. Prefer named intermediate values and multiline control flow over compressed expressions.
+- Do not write one-liners for business logic, branching, error handling, or side effects.
+- Prefer small pure functions and functional composition where it improves clarity.
+- Keep solutions KISS: use the simplest design that correctly meets the requirement.
+- Follow DRY: reuse shared behavior when duplication is meaningful; do not create abstractions for one-off code.
+- Preserve validation, error handling, security, and accessibility while simplifying code.
+- Avoid comments unless the code cannot clearly express intent.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
