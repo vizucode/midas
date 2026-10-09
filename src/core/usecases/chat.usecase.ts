@@ -11,16 +11,28 @@ export function formatApproval(request: { name?: string; args?: unknown }): stri
     return text;
 }
 export function scopeReply(message: string): string | undefined {
-    const scope = classifyFinanceScope(message);
-    if (scope === "bot_help") return "Saya asisten keuangan pribadi. Saya bisa bantu cek rekening, catat transaksi, buat anggaran, dan rangkum pengeluaran.";
-    if (scope === "out_of_scope") return "Saya fokus bantu urusan keuangan dan akuntansi, seperti transaksi, rekening, anggaran, dan laporan pengeluaran.";
+    if (classifyFinanceScope(message) === "bot_help") return "Saya asisten keuangan pribadi. Saya bisa bantu cek rekening, catat transaksi, buat anggaran, dan rangkum pengeluaran.";
 }
 export function dateContext() {
     const date = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
     return `Current date: ${date}. Time zone: Asia/Jakarta. Always use ISO 8601 dates in tool arguments; never use MM/DD/YYYY. Resolve relative date expressions into exact ISO-8601 date ranges. For financial reports, last N months means N full calendar months before the current month; do not ask for confirmation. Past N months means a rolling range ending today. Ask for dates only when no standard interpretation applies.`;
 }
+export type ScopeReplyGenerator = (text: string, owner: string, chat: string, abortSignal: AbortSignal) => Promise<string>;
 export class ChatService {
-    constructor(readonly agent: FinancialAgent, readonly store: ApprovalStore, readonly contracts: Record<string, string>) {}
+    constructor(readonly agent: FinancialAgent, readonly store: ApprovalStore, readonly contracts: Record<string, string>, readonly generateScopeReply?: ScopeReplyGenerator) { }
+    private async outOfScope(text: string, owner: string, chat: string): Promise<ChatResult> {
+        if (!this.generateScopeReply) {
+            return { text: "Aku belum bisa bantu soal itu. Aku bisa bantu urusan keuangan seperti transaksi, rekening, anggaran, atau pengeluaran." };
+        }
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 10000);
+            try {
+                const reply = await this.generateScopeReply(text, owner, chat, controller.signal);
+                return { text: reply.trim() || "Aku fokus bantu urusan keuangan. Ada yang ingin kamu cek?" };
+            } finally { clearTimeout(timer); }
+        } catch { return { text: "Aku belum bisa bantu soal itu. Aku bisa bantu urusan keuangan seperti transaksi, rekening, anggaran, atau pengeluaran." }; }
+    }
     private async execute(owner: string, chat: string, run: string, action: (options: { requestContext: RequestContext; abortSignal: AbortSignal; maxSteps: number }) => Promise<Awaited<ReturnType<FinancialAgent["generate"]>>>, nativeRun = run): Promise<ChatResult> {
         const requestContext = new RequestContext();
         for (const [key, value] of Object.entries({ appRunId: run, ownerId: owner, chatId: chat, nativeRunId: nativeRun })) requestContext.set(key, value);
@@ -31,7 +43,7 @@ export class ChatService {
             if (remaining <= 0) throw new Error("Execution deadline exhausted");
             const result = await Promise.race([action({ requestContext, abortSignal: controller.signal, maxSteps: 30 }), new Promise<never>((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("Execution deadline exhausted")), { once: true }))]);
             const outcome = await this.store.outcome(run);
-            if (outcome.failed || controller.signal.aborted) throw new Error("Tool failed");
+            if (result.tripwire || outcome.failed || controller.signal.aborted) throw new Error("Execution blocked or failed");
             if (result.finishReason === "suspended") {
                 const p = result.suspendPayload as { toolCallId?: string; toolName?: string; args?: unknown };
                 if (!p?.toolCallId || !p.toolName || !result.runId || !this.contracts[p.toolName]) throw new Error("Invalid suspension");
@@ -50,16 +62,15 @@ export class ChatService {
         } finally { clearTimeout(timer); }
     }
     async message(owner: string, chat: string, text: string): Promise<ChatResult> {
-        const reply = scopeReply(text);
-        if (reply) return { text: reply };
+        if (scopeReply(text) || classifyFinanceScope(text) === "out_of_scope") return this.outOfScope(text, owner, chat);
         const run = await this.store.start(owner, chat);
-        return this.execute(owner, chat, run, options => this.agent.generate([{ role: "system", content: dateContext() }, { role: "user", content: text }], { ...options, runId: run }));
+        return this.execute(owner, chat, run, options => this.agent.generate([{ role: "system", content: dateContext() }, { role: "user", content: text }], { ...options, runId: run, memory: { resource: owner, thread: chat } }));
     }
     async decide(owner: string, chat: string, id: string, approve: boolean): Promise<ChatResult> {
         const decision = await this.store.claim(id, owner, chat, approve);
         if (!decision) return { text: "Persetujuan tidak tersedia atau sudah digunakan. Jika perubahan pernah diproses, periksa catatan sebelum mencoba lagi." };
         return this.execute(owner, chat, decision.run, options => approve
-            ? this.agent.approveToolCallGenerate({ ...options, runId: decision.native_run, toolCallId: decision.call_id })
-            : this.agent.declineToolCallGenerate({ ...options, runId: decision.native_run, toolCallId: decision.call_id, reason: "Pengguna menolak perubahan ini." }), decision.native_run);
+            ? this.agent.approveToolCallGenerate({ ...options, runId: decision.native_run, toolCallId: decision.call_id, memory: { resource: owner, thread: chat } })
+            : this.agent.declineToolCallGenerate({ ...options, runId: decision.native_run, toolCallId: decision.call_id, reason: "Pengguna menolak perubahan ini.", memory: { resource: owner, thread: chat } }), decision.native_run);
     }
 }

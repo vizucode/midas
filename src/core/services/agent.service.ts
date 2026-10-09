@@ -1,11 +1,37 @@
 import { Agent } from "@mastra/core/agent";
-import { createTool, type Tool } from "@mastra/core/tools";
+import { RegexFilterProcessor, UnicodeNormalizer } from "@mastra/core/processors";
 import { standardSchemaToJSONSchema } from "@mastra/core/schema";
-import { getMcpTools } from "./mcp.service";
+import { createTool, type Tool } from "@mastra/core/tools";
+import { Memory } from "@mastra/memory";
 import { ApprovalStore, canonical } from "./approval.store";
+import { getMcpTools } from "./mcp.service";
 
-export const reads = new Set(["get_client_profile", "get_records", "get_accounts", "get_categories", "get_budgets", "get_labels", "get_records_aggregation", "get_entity", "get_references"]);
-export const writes = new Set(["create_records", "create_account", "create_budget", "create_category", "create_label", "patch_records", "patch_accounts", "patch_budgets", "patch_categories", "patch_labels", "delete_documents"]);
+export const reads = new Set([
+    "get_client_profile",
+    "get_records",
+    "get_accounts",
+    "get_categories",
+    "get_budgets",
+    "get_labels",
+    "get_records_aggregation",
+    "get_entity",
+    "get_references",
+]);
+
+export const writes = new Set([
+    "create_records",
+    "create_account",
+    "create_budget",
+    "create_category",
+    "create_label",
+    "patch_records",
+    "patch_accounts",
+    "patch_budgets",
+    "patch_categories",
+    "patch_labels",
+    "delete_documents",
+]);
+
 export const instructions = `You are a financial assistant.
 - Never include optional fields when their value is empty, null, unknown, or invalid. Only send optional enum fields with allowed values.
 - For all-transactions requests omit categoryId and categoryGroup. Never query every category separately.
@@ -21,38 +47,175 @@ export const instructions = `You are a financial assistant.
 - Use a friendly-professional tone; slang only when natural. Keep tool names, field names, enums, dates, and numbers exactly as required by MCP schema; do not translate tool arguments.`;
 
 export function normalize(name: string, input: unknown) {
-    if (!input || typeof input !== "object" || Array.isArray(input)) return input;
-    const args = Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([, value]) => value != null && (typeof value !== "string" || value.trim() !== "") && (!Array.isArray(value) || !value.length || !value.every(x => typeof x === "string" && !x.trim()))));
-    if (name === "get_records") delete args.categoryGroup;
-    if (name === "get_records_aggregation" && Array.isArray(args.groupBy) && args.groupBy.includes("category:name")) { delete args.categoryId; delete args.categoryGroup; }
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return input;
+    }
+
+    const args = Object.fromEntries(
+        Object.entries(input as Record<string, unknown>).filter(([, value]) => {
+            if (value == null) {
+                return false;
+            }
+
+            if (typeof value === "string") {
+                return value.trim() !== "";
+            }
+
+            if (!Array.isArray(value) || value.length === 0) {
+                return true;
+            }
+
+            return !value.every(item => typeof item === "string" && item.trim() === "");
+        }),
+    );
+
+    if (name === "get_records") {
+        delete args.categoryGroup;
+    }
+
+    const groupedByCategory = name === "get_records_aggregation"
+        && Array.isArray(args.groupBy)
+        && args.groupBy.includes("category:name");
+
+    if (groupedByCategory) {
+        delete args.categoryId;
+        delete args.categoryGroup;
+    }
+
     return args;
 }
 
 export function contractsFor(tools: Awaited<ReturnType<typeof getMcpTools>>) {
-    return Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, canonical(standardSchemaToJSONSchema(tool.inputSchema!, { io: "input" }))]));
+    return Object.fromEntries(Object.entries(tools).map(([name, tool]) => {
+        const schema = standardSchemaToJSONSchema(tool.inputSchema!, { io: "input" });
+        return [name, canonical(schema)];
+    }));
+}
+
+export function guardrails() {
+    const normalizer = new UnicodeNormalizer({
+        stripControlChars: true,
+        preserveEmojis: true,
+        collapseWhitespace: true,
+        trim: true,
+    });
+    const promptInjectionFilter = new RegexFilterProcessor({
+        strategy: "block",
+        phase: "input",
+        rules: [{
+            name: "prompt-injection",
+            pattern: /ignore\s+(all\s+)?previous|reveal\s+(the\s+)?system\s+prompt|jailbreak|bypass\s+(your\s+)?safety/i,
+        }],
+    });
+    const systemPromptFilter = new RegexFilterProcessor({
+        strategy: "redact",
+        phase: "output",
+        rules: [{
+            name: "system-prompt",
+            pattern: /system prompt|internal instructions/gi,
+        }],
+    });
+
+    return {
+        inputProcessors: [normalizer, promptInjectionFilter],
+        outputProcessors: [systemPromptFilter],
+    };
+}
+
+export const memory = new Memory({ options: { lastMessages: 20 } });
+
+function operationName(toolName: string) {
+    return toolName.slice("budgetBakers_".length);
+}
+
+function aggregationKey(toolName: string, args: unknown) {
+    if (operationName(toolName) === "get_records_aggregation") {
+        const groupBy = (args as Record<string, unknown>).groupBy;
+
+        if (Array.isArray(groupBy) && groupBy.includes("category:name")) {
+            return "category-aggregation";
+        }
+    }
+
+    return `${toolName}:${canonical(args)}`;
 }
 
 export async function createFinancialAgent(store: ApprovalStore, supplied?: Awaited<ReturnType<typeof getMcpTools>>) {
-    const remote = supplied ?? await getMcpTools();
-    const contracts = contractsFor(remote);
+    const remoteTools = supplied ?? await getMcpTools();
+    const contracts = contractsFor(remoteTools);
     const tools: Record<string, Tool<any, any>> = {};
-    for (const [qualified, source] of Object.entries(remote)) {
-        if (!qualified.startsWith("budgetBakers_") || !source.inputSchema || !source.execute) throw new Error(`Unsupported MCP tool: ${qualified}`);
-        const name = qualified.slice("budgetBakers_".length);
-        if (!reads.has(name) && !writes.has(name)) throw new Error(`Unclassified MCP tool: ${qualified}`);
-        tools[qualified] = createTool({ id: qualified, description: source.description, inputSchema: source.inputSchema, requireApproval: writes.has(name), execute: async (input, context) => {
-            const request = context?.requestContext;
-            const run = request?.get("appRunId"), owner = request?.get("ownerId"), chat = request?.get("chatId");
-            if (![run, owner, chat].every(x => typeof x === "string")) throw new Error("Missing trusted execution identity");
-            const args = normalize(name, input);
-            if (writes.has(name) && canonical(input) !== canonical(args)) throw new Error("Reviewed arguments differ from executable arguments");
-            const nativeRun = String(request?.get("nativeRunId") ?? run);
-            const callId = context?.agent?.toolCallId ?? "";
-            const key = name === "get_records_aggregation" && Array.isArray((args as Record<string, unknown>).groupBy) && ((args as Record<string, unknown>).groupBy as unknown[]).includes("category:name") ? "category-aggregation" : `${qualified}:${canonical(args)}`;
-            await store.execute(String(run), String(owner), String(chat), nativeRun, callId, qualified, args, contracts[qualified]!, writes.has(name), key);
-            try { return await source.execute!(args, context as never); } catch (error) { await store.fail(String(run)); throw error; }
-        } });
+
+    for (const [qualifiedName, source] of Object.entries(remoteTools)) {
+        if (!qualifiedName.startsWith("budgetBakers_") || !source.inputSchema || !source.execute) {
+            throw new Error(`Unsupported MCP tool: ${qualifiedName}`);
+        }
+
+        const name = operationName(qualifiedName);
+        const isRead = reads.has(name);
+        const isWrite = writes.has(name);
+
+        if (!isRead && !isWrite) {
+            throw new Error(`Unclassified MCP tool: ${qualifiedName}`);
+        }
+
+        tools[qualifiedName] = createTool({
+            id: qualifiedName,
+            description: source.description,
+            inputSchema: source.inputSchema,
+            requireApproval: isWrite,
+            execute: async (input, context) => {
+                const request = context?.requestContext;
+                const runId = request?.get("appRunId");
+                const ownerId = request?.get("ownerId");
+                const chatId = request?.get("chatId");
+
+                if (![runId, ownerId, chatId].every(value => typeof value === "string")) {
+                    throw new Error("Missing trusted execution identity");
+                }
+
+                const args = normalize(name, input);
+
+                if (isWrite && canonical(input) !== canonical(args)) {
+                    throw new Error("Reviewed arguments differ from executable arguments");
+                }
+
+                const nativeRunId = String(request?.get("nativeRunId") ?? runId);
+                const toolCallId = context?.agent?.toolCallId ?? "";
+                const key = aggregationKey(qualifiedName, args);
+
+                await store.execute(
+                    String(runId),
+                    String(ownerId),
+                    String(chatId),
+                    nativeRunId,
+                    toolCallId,
+                    qualifiedName,
+                    args,
+                    contracts[qualifiedName]!,
+                    isWrite,
+                    key,
+                );
+
+                try {
+                    return await source.execute!(args, context as never);
+                } catch (error) {
+                    await store.fail(String(runId));
+                    throw error;
+                }
+            },
+        });
     }
-    return new Agent({ id: "financial-agent", name: "Midas", instructions, model: (`nine-router/nine/${process.env.NINE_ROUTER_MODEL}`) as never, tools, defaultOptions: { maxSteps: 30 } });
+
+    return new Agent({
+        id: "financial-agent",
+        name: "Midas",
+        instructions,
+        model: (`nine-router/nine/${process.env.NINE_ROUTER_MODEL}`) as never,
+        tools,
+        memory,
+        ...guardrails(),
+        defaultOptions: { maxSteps: 30 },
+    });
 }
+
 export type FinancialAgent = Awaited<ReturnType<typeof createFinancialAgent>>;
